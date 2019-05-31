@@ -471,7 +471,7 @@ when this is t a lot of graphs will be generated.")
   ;; required by most of the below
   (cleavir-hir-transformations:process-captured-variables init-instr)
   (setf *ct-process-captured-variables* (compiler-timer-elapsed))
-  (quick-draw-hir init-instr "hir-after-pcv") 
+  (quick-draw-hir init-instr "hir-after-pcv")
   (clasp-cleavir:optimize-stack-enclose init-instr) ; see FIXME at definition
   (setf *ct-optimize-stack-enclose* (compiler-timer-elapsed))
   (cleavir-kildall-type-inference:thes->typeqs init-instr clasp-cleavir:*clasp-env*)
@@ -789,9 +789,10 @@ This works like compile-lambda-function in bclasp."
                                  ("BELL"   . #.(code-char 7))
                                  ("BEL"    . #.(code-char 7))
                                  ("VT"     . #.(code-char 11))
+                                 ("CR"     . #.(code-char 13))
+                                 ("SUB"    . #.(code-char 26))
                                  ("ESCAPE" . #.(code-char 27))
-                                 ("DEL"    . #.(code-char 127))
-                                 ("CR"     . #.(code-char 13)))
+                                 ("DEL"    . #.(code-char 127)))
                                :test 'equal))
 
 (defun simple-unicode-name (name)

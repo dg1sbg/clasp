@@ -47,19 +47,22 @@
 (define-condition compiler-condition (condition)
   ((%origin :reader compiler-condition-origin :initarg :origin)))
 
-(define-condition undefined-variable-warning
-    (warning compiler-condition)
-  ((%name :reader compiler-warning-name :initarg :name))
+;;; Abstract
+(define-condition undefined-warning (compiler-condition)
+  ((%name :reader undefined-warning-name :initarg :name)
+   (%kind :reader undefined-warning-kind :allocation :class))
   (:report (lambda (condition stream)
-             (format stream "Undefined variable ~a"
-                     (compiler-warning-name condition)))))
+             (format stream "Undefined ~(~a~) ~a"
+                     (undefined-warning-kind condition)
+                     (undefined-warning-name condition)))))
+
+(define-condition undefined-variable-warning
+    (warning undefined-warning)
+  ((%kind :initform 'variable)))
 
 (define-condition undefined-function-warning
-    (style-warning compiler-condition)
-  ((%name :reader compiler-warning-name :initarg :name))
-  (:report (lambda (condition stream)
-             (format stream "Undefined function ~a"
-                     (compiler-warning-name condition)))))
+    (style-warning undefined-warning)
+  ((%kind :initform 'function)))
 
 (define-condition redefined-function-warning
     (warning compiler-condition)
@@ -146,7 +149,8 @@
 ;;; This does mean that even if a higher level handler handles the condition,
 ;;; compilation fails. FIXME?
 ;;; In sbcl this is bracketed in signal ... continue, but we have more specific things
-;;; to do than continue.
+;;; to do than continue. We could maybe use signal ... continue if lower level handlers
+;;; resignaled (as they already do) but in a restart-case establishing a CONTINUE.
 (defun compiler-error-handler (condition)
   (incf *compiler-error-count*)
   (setf *warnings-p* t *failure-p* t)
@@ -162,7 +166,7 @@
 (defun compiler-style-warning-handler (condition)
   (signal condition)
   (incf *compiler-style-warning-count*)
-  (setf *warnings-p* t *failure-p* t)
+  (setf *warnings-p* t)
   (print-compiler-condition condition)
   (muffle-warning condition))
 
