@@ -122,6 +122,9 @@
             compiler-message-file
             compiler-message-file-position
             warn-undefined-global-variable
+            warn-undefined-type
+            warn-invalid-number-type
+            warn-icsp-iesp-both-specified
             register-global-function-def
             register-global-function-ref
             analyze-top-level-form
@@ -263,6 +266,15 @@
           generate-load-time-values
           ))
 
+;;; exports for conditions
+(export '(deencapsulate-compiler-condition
+          compiler-condition-origin
+          compiled-program-error
+          compiler-condition
+          undefined-variable-warning
+          undefined-function-warning
+          undefined-type-warning
+          redefined-function-warning))
 
 (in-package :literal)
 
