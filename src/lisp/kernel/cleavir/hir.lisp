@@ -161,6 +161,20 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
+;;; Instruction HEADER-STAMP-CASE-INSTRUCTION
+;;;
+
+(defclass header-stamp-case-instruction (cleavir-ir:instruction
+                                         cleavir-ir:multiple-successors-mixin)
+  ())
+(defun make-header-stamp-case-instruction (stamp &rest successors)
+  (make-instance 'header-stamp-case-instruction
+                 :inputs (list stamp)
+                 :outputs nil
+                 :successors successors))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
 ;;; Instruction VECTOR-LENGTH-INSTRUCTION
 ;;;
 ;;; This instruction gets the length of a vector, as CL:LENGTH.
@@ -269,6 +283,38 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
+;;; Instruction HEADER-STAMP-INSTRUCTION
+;;;
+
+(defclass header-stamp-instruction (cleavir-ir:instruction cleavir-ir:one-successor-mixin) ())
+(defmethod cleavir-ir-graphviz:label ((instr header-stamp-instruction)) "header-stamp")
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Instruction RACK-STAMP-INSTRUCTION
+;;;
+
+(defclass rack-stamp-instruction (cleavir-ir:instruction cleavir-ir:one-successor-mixin) ())
+(defmethod cleavir-ir-graphviz:label ((instr rack-stamp-instruction)) "rack-stamp")
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Instruction WRAPPED-STAMP-INSTRUCTION
+;;;
+
+(defclass wrapped-stamp-instruction (cleavir-ir:instruction cleavir-ir:one-successor-mixin) ())
+(defmethod cleavir-ir-graphviz:label ((instr wrapped-stamp-instruction)) "wrapped-stamp")
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Instruction DERIVABLE-STAMP-INSTRUCTION
+;;;
+
+(defclass derivable-stamp-instruction (cleavir-ir:instruction cleavir-ir:one-successor-mixin) ())
+(defmethod cleavir-ir-graphviz:label ((instr derivable-stamp-instruction)) "derivable-stamp")
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
 ;;; Instruction VASLIST-POP-INSTRUCTION
 ;;;
 
@@ -285,17 +331,17 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
-;;; Instruction INSTANCE-STAMP-INSTRUCTION
+;;; Instruction VASLIST-LENGTH-INSTRUCTION
 ;;;
 
-(defclass instance-stamp-instruction (cleavir-ir:instruction cleavir-ir:one-successor-mixin)
+(defclass vaslist-length-instruction (cleavir-ir:instruction cleavir-ir:one-successor-mixin)
   ())
 
-(defmethod cleavir-ir-graphviz:label ((instr instance-stamp-instruction)) "instance-stamp")
+(defmethod cleavir-ir-graphviz:label ((instr vaslist-length-instruction)) "vaslist-length")
 
-(defun make-instance-stamp-instruction (arg output &optional (successor nil successorp))
-  (make-instance 'instance-stamp-instruction
-                 :inputs (list arg)
+(defun make-vaslist-length-instruction (vaslist output &optional (successor nil successorp))
+  (make-instance 'vaslist-length-instruction
+                 :inputs (list vaslist)
                  :outputs (list output)
                  :successors (if successorp (list successor) nil)))
 

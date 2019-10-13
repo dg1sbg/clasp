@@ -45,7 +45,6 @@ THE SOFTWARE.
 #include <clasp/core/hashTable.h>
 #include <clasp/core/mathDispatch.h>
 #include <clasp/core/num_arith.h>
-#include <clasp/core/math_fenv.h>
 #include <clasp/gctools/pointer_tagging.h>
 #include <clasp/core/wrappers.h>
 #include <clasp/core/num_co.h>
@@ -86,35 +85,8 @@ CL_DEFUN core::Number_sp add_mod8(core::T_O* x, core::T_O* y)
   return core::Number_sp((gc::Tagged)reinterpret_cast<core::T_O*>(z));
 };
 
-SYMBOL_EXPORT_SC_(ClPkg, divisionByZero);
-SYMBOL_EXPORT_SC_(ClPkg, floatingPointInvalidOperation);
-SYMBOL_EXPORT_SC_(ClPkg, floatingPointOverflow);
-SYMBOL_EXPORT_SC_(ClPkg, floatingPointUnderflow);
-SYMBOL_EXPORT_SC_(ClPkg, floatingPointInexact);
-SYMBOL_EXPORT_SC_(ClPkg, arithmeticError);
-
 void clasp_report_divide_by_zero(Number_sp x) {
    ERROR_DIVISION_BY_ZERO(clasp_make_fixnum(1),x);
-}
-
-void clasp_deliver_fpe(int status) {
-  int bits = status & _lisp->trapFpeBits();
-  if (bits) {
-    T_sp condition;
-    if (bits & FE_DIVBYZERO)
-      condition = cl::_sym_divisionByZero;
-    else if (bits & FE_INVALID)
-      condition = cl::_sym_floatingPointInvalidOperation;
-    else if (bits & FE_OVERFLOW)
-      condition = cl::_sym_floatingPointOverflow;
-    else if (bits & FE_UNDERFLOW)
-      condition = cl::_sym_floatingPointUnderflow;
-    else if (bits & FE_INEXACT)
-      condition = cl::_sym_floatingPointInexact;
-    else
-      condition = cl::_sym_arithmeticError;
-    eval::funcall(cl::_sym_error, condition);
-  }
 }
 
 Number_sp clasp_make_complex (Real_sp r, Real_sp i) {
@@ -245,170 +217,6 @@ CL_DEFUN Real_sp cl__max(Real_sp max, List_sp nums) {
   }
   return max;
 }
-
-CL_LAMBDA(&rest integers);
-CL_DECLARE();
-CL_DOCSTRING("logand");
-CL_DEFUN Integer_sp cl__logand(List_sp integers) {
-  if (integers.nilp())
-    return Integer_O::create((gc::Fixnum) - 1);
-  mpz_class acc = clasp_to_mpz(gc::As<Integer_sp>(oCar(integers)));
-  for (auto cur : (List_sp)oCdr(integers)) {
-    Integer_sp icur = gc::As<Integer_sp>(oCar(cur));
-    mpz_class temp;
-    mpz_and(temp.get_mpz_t(), acc.get_mpz_t(), clasp_to_mpz(icur).get_mpz_t());
-    acc = temp;
-  }
-  return Integer_O::create(acc);
-};
-
-CL_LAMBDA(&rest integers);
-CL_DECLARE();
-CL_DOCSTRING("logior");
-CL_DEFUN Integer_sp cl__logior(List_sp integers) {
-  if (integers.nilp())
-    return Integer_O::create((gc::Fixnum)0);
-  Integer_sp ifirst = gc::As<Integer_sp>(oCar(integers));
-  mpz_class acc = clasp_to_mpz(ifirst);
-  List_sp rints = oCdr(integers);
-  for (auto cur : rints) {
-    Integer_sp icur = gc::As<Integer_sp>(oCar(cur));
-    mpz_class temp;
-    mpz_ior(temp.get_mpz_t(), acc.get_mpz_t(), clasp_to_mpz(icur).get_mpz_t());
-    acc = temp;
-  }
-  return Integer_O::create(acc);
-};
-
-CL_LAMBDA(&rest integers);
-CL_DECLARE();
-CL_DOCSTRING("logxor");
-CL_DEFUN Integer_sp cl__logxor(List_sp integers) {
-  if (integers.nilp())
-    return Integer_O::create((gc::Fixnum)0);
-  Integer_sp ifirst = gc::As<Integer_sp>(oCar(integers));
-  mpz_class acc = clasp_to_mpz(ifirst);
-  for (auto cur : (List_sp)oCdr(integers)) {
-    Integer_sp icur = gc::As<Integer_sp>(oCar(cur));
-    mpz_class temp;
-    mpz_xor(temp.get_mpz_t(), acc.get_mpz_t(), clasp_to_mpz(icur).get_mpz_t());
-    acc = temp;
-  }
-  return Integer_O::create(acc);
-};
-
-CL_LAMBDA(&rest integers);
-CL_DECLARE();
-CL_DOCSTRING("logeqv");
-CL_DEFUN Integer_mv cl__logeqv(List_sp integers) {
-  if (integers.nilp())
-    return Integer_O::create((gc::Fixnum) - 1);
-  Integer_sp ifirst = gc::As<Integer_sp>(oCar(integers));
-  mpz_class x = clasp_to_mpz(ifirst);
-  for (auto cur : (List_sp)oCdr(integers)) {
-    Integer_sp icur = gc::As<Integer_sp>(oCar(cur));
-    mpz_class y = clasp_to_mpz(icur);
-    mpz_class x_and_y;
-    mpz_and(x_and_y.get_mpz_t(), x.get_mpz_t(), y.get_mpz_t());
-    mpz_class compx;
-    mpz_com(compx.get_mpz_t(), x.get_mpz_t());
-    mpz_class compy;
-    mpz_com(compy.get_mpz_t(), y.get_mpz_t());
-    mpz_class compx_and_compy;
-    mpz_and(compx_and_compy.get_mpz_t(), compx.get_mpz_t(), compy.get_mpz_t());
-    // calculate ex-nor
-    mpz_ior(x.get_mpz_t(), x_and_y.get_mpz_t(), compx_and_compy.get_mpz_t());
-  }
-  return (Values(Integer_O::create(x)));
-};
-
-CL_LAMBDA(a b);
-CL_DECLARE();
-CL_DOCSTRING("logandc1");
-CL_DEFUN T_mv cl__logandc1(Integer_sp a, Integer_sp b) {
-  mpz_class za = clasp_to_mpz(a);
-  mpz_class zb = clasp_to_mpz(b);
-  mpz_class cza;
-  mpz_com(cza.get_mpz_t(), za.get_mpz_t());
-  mpz_class r;
-  mpz_and(r.get_mpz_t(), cza.get_mpz_t(), zb.get_mpz_t());
-  return (Values(Integer_O::create(r)));
-};
-
-CL_LAMBDA(a b);
-CL_DECLARE();
-CL_DOCSTRING("logandc2");
-CL_DEFUN T_mv cl__logandc2(Integer_sp a, Integer_sp b) {
-  mpz_class za = clasp_to_mpz(a);
-  mpz_class zb = clasp_to_mpz(b);
-  mpz_class czb;
-  mpz_com(czb.get_mpz_t(), zb.get_mpz_t());
-  mpz_class r;
-  mpz_and(r.get_mpz_t(), za.get_mpz_t(), czb.get_mpz_t());
-  return (Values(Integer_O::create(r)));
-};
-
-CL_LAMBDA(a b);
-CL_DECLARE();
-CL_DOCSTRING("logorc1");
-CL_DEFUN T_mv cl__logorc1(Integer_sp a, Integer_sp b) {
-  mpz_class za = clasp_to_mpz(a);
-  mpz_class zb = clasp_to_mpz(b);
-  mpz_class cza;
-  mpz_com(cza.get_mpz_t(), za.get_mpz_t());
-  mpz_class r;
-  mpz_ior(r.get_mpz_t(), cza.get_mpz_t(), zb.get_mpz_t());
-  return (Values(Integer_O::create(r)));
-};
-
-CL_LAMBDA(a b);
-CL_DECLARE();
-CL_DOCSTRING("logorc2");
-CL_DEFUN T_mv cl__logorc2(Integer_sp a, Integer_sp b) {
-  mpz_class za = clasp_to_mpz(a);
-  mpz_class zb = clasp_to_mpz(b);
-  mpz_class czb;
-  mpz_com(czb.get_mpz_t(), zb.get_mpz_t());
-  mpz_class r;
-  mpz_ior(r.get_mpz_t(), za.get_mpz_t(), czb.get_mpz_t());
-  return (Values(Integer_O::create(r)));
-};
-
-CL_LAMBDA(a);
-CL_DECLARE();
-CL_DOCSTRING("lognot");
-CL_DEFUN T_mv cl__lognot(Integer_sp a) {
-  mpz_class za = clasp_to_mpz(a);
-  mpz_class cza;
-  mpz_com(cza.get_mpz_t(), za.get_mpz_t());
-  return (Values(Integer_O::create(cza)));
-};
-
-CL_LAMBDA(a b);
-CL_DECLARE();
-CL_DOCSTRING("lognand");
-CL_DEFUN T_mv cl__lognand(Integer_sp a, Integer_sp b) {
-  mpz_class za = clasp_to_mpz(a);
-  mpz_class zb = clasp_to_mpz(b);
-  mpz_class zand;
-  mpz_and(zand.get_mpz_t(), za.get_mpz_t(), zb.get_mpz_t());
-  mpz_class r;
-  mpz_com(r.get_mpz_t(), zand.get_mpz_t());
-  return (Values(Integer_O::create(r)));
-};
-
-CL_LAMBDA(a b);
-CL_DECLARE();
-CL_DOCSTRING("lognor");
-CL_DEFUN T_mv cl__lognor(Integer_sp a, Integer_sp b) {
-  mpz_class za = clasp_to_mpz(a);
-  mpz_class zb = clasp_to_mpz(b);
-  mpz_class zor;
-  mpz_ior(zor.get_mpz_t(), za.get_mpz_t(), zb.get_mpz_t());
-  mpz_class r;
-  mpz_com(r.get_mpz_t(), zor.get_mpz_t());
-  return (Values(Integer_O::create(r)));
-};
 
 CL_NAME("TWO-ARG-+-FIXNUM-FIXNUM");
 inline CL_DEFUN Number_sp two_arg__PLUS_FF(Fixnum fa, Fixnum fb)
@@ -1225,6 +1033,19 @@ T_sp numbers_monotonic(int s, int t, List_sp args) {
   return _lisp->_true();
 };
 
+T_sp numbers_monotonic_vaslist(int s, int t, VaList_sp args) {
+  Real_sp c = gc::As<Real_sp>(args->next_arg());
+  Real_sp d;
+  int dir;
+  while (args->remaining_nargs()>0) {
+    d = gc::As<Real_sp>(args->next_arg());
+    dir = s * basic_compare(c, d);
+    if (dir < t) return _lisp->_false();
+    c = d;
+  }
+  return _lisp->_true();
+};
+
 CL_NAME("TWO-ARG-<");
 CL_DEFUN bool two_arg__LT_(Number_sp x, Number_sp y) {
   return basic_compare(x, y) == -1;
@@ -1245,32 +1066,36 @@ CL_DEFUN bool two_arg__GE_(Number_sp x, Number_sp y) {
   return basic_compare(x, y) != -1;
 }
 
-CL_LAMBDA(&rest args);
-CL_DEFUN T_sp cl___LT_(List_sp args) {
-  if (args.nilp())
-      SIMPLE_PROGRAM_ERROR("< needs at least 1 argument",_Nil<T_O>());
-  return numbers_monotonic(-1, 1, args);
+CL_LAMBDA(core:&va-rest args);
+CL_DEFUN T_sp cl___LT_(VaList_sp args) {
+  if (args->remaining_nargs()<1) {
+    SIMPLE_ERROR(BF("< needs at least one argument"));
+  }
+  return numbers_monotonic_vaslist(-1, 1, args);
 };
 
-CL_LAMBDA(&rest args);
-CL_DEFUN T_sp cl___GT_(List_sp args) {
-  if (args.nilp())
-      SIMPLE_PROGRAM_ERROR("> needs at least 1 argument",_Nil<T_O>());
-  return numbers_monotonic(1, 1, args);
+CL_LAMBDA(core:&va-rest args);
+CL_DEFUN T_sp cl___GT_(VaList_sp args) {
+  if (args->remaining_nargs()<1) {
+    SIMPLE_ERROR(BF("> needs at least one argument"));
+  }
+  return numbers_monotonic_vaslist(1, 1, args);
 };
 
-CL_LAMBDA(&rest args);
-CL_DEFUN T_sp cl___LE_(List_sp args) {
-  if (args.nilp())
-      SIMPLE_PROGRAM_ERROR("<= needs at least 1 argument",_Nil<T_O>());
-  return numbers_monotonic(-1, 0, args);
+CL_LAMBDA(core:&va-rest args);
+CL_DEFUN T_sp cl___LE_(VaList_sp args) {
+  if (args->remaining_nargs()<1) {
+    SIMPLE_ERROR(BF("> needs at least one argument"));
+  }
+  return numbers_monotonic_vaslist(-1, 0, args);
 };
 
-CL_LAMBDA(&rest args);
-CL_DEFUN T_sp cl___GE_(List_sp args) {
-  if (args.nilp())
-      SIMPLE_PROGRAM_ERROR(">= needs at least 1 argument",_Nil<T_O>());
-  return numbers_monotonic(1, 0, args);
+CL_LAMBDA(core:&va-rest args);
+CL_DEFUN T_sp cl___GE_(VaList_sp args) {
+  if (args->remaining_nargs()<1) {
+    SIMPLE_ERROR(BF(">= needs at least one argument"));
+  }
+  return numbers_monotonic_vaslist(1, 0, args);
 };
 
 /*! Return true if two numbers are equal otherwise false */
@@ -1490,7 +1315,10 @@ SYMBOL_EXPORT_SC_(ClPkg, _PLUS_);
 SYMBOL_EXPORT_SC_(ClPkg, _TIMES_);
 SYMBOL_EXPORT_SC_(ClPkg, _MINUS_);
 SYMBOL_EXPORT_SC_(ClPkg, _DIVIDE_);
-
+SYMBOL_EXPORT_SC_(CorePkg, logand_2op);
+SYMBOL_EXPORT_SC_(CorePkg, logxor_2op);
+SYMBOL_EXPORT_SC_(CorePkg, logior_2op);
+SYMBOL_EXPORT_SC_(CorePkg, logeqv_2op);
 
 
 Number_sp Number_O::create(double val) {
@@ -2656,7 +2484,6 @@ clasp_expt(Number_sp x, Number_sp y) {
     z = clasp_expt(x, z);
     z = clasp_divide(clasp_make_fixnum(1), z);
   } else {
-    CLASP_MATHERR_CLEAR;
     z = clasp_make_fixnum(1);
     Integer_sp iy = gc::As<Integer_sp>(y);
     do {
@@ -2668,7 +2495,6 @@ clasp_expt(Number_sp x, Number_sp y) {
         break;
       x = clasp_times(x, x);
     } while (1);
-    CLASP_MATHERR_TEST;
   }
   return z;
 }
@@ -2762,7 +2588,6 @@ clasp_atan2_LongFloat(LongFloat y, LongFloat x) {
 
 Number_sp clasp_atan2(Number_sp y, Number_sp x) {
   Number_sp output;
-  CLASP_MATHERR_CLEAR;
   {
 #ifdef CLASP_LONG_FLOAT
     NumberType tx = clasp_t_of(x);
@@ -2794,7 +2619,6 @@ Number_sp clasp_atan2(Number_sp y, Number_sp x) {
     }
 #endif
   }
-  CLASP_MATHERR_TEST;
   return output;
 }
 
@@ -3582,8 +3406,68 @@ LongFloat clasp_to_long_double(Number_sp x)
 
   // --- END OF TRANSLATORS ---
 
+CL_LAMBDA(singleFloat);
+CL_DECLARE();
+CL_DOCSTRING("Return the bit representation of a single float in a lisp Fixnum");
+CL_DEFUN Fixnum_sp core__single_float_bits(SingleFloat_sp singleFloat) {
+  union SingleFloatConversion {
+        float input;
+        long  output;
+  };
+  SingleFloatConversion converter;
+  converter.input = unbox_single_float(singleFloat);
+  return clasp_make_fixnum((gc::Fixnum) converter.output);
+}
+
+CL_LAMBDA(bit-representation);
+CL_DECLARE();
+CL_DOCSTRING("Convert a bit representation in a lisp Fixnum to a single float");
+CL_DEFUN SingleFloat_sp core__single_float_from_unsigned_byte_32(Fixnum_sp fixnum) {
+  union SingleFloatConversion {
+        float input;
+        long  output;
+    };
+  SingleFloatConversion converter;
+  converter.output = unbox_fixnum(fixnum);
+  return make_single_float(converter.input);
 };
 
+CL_LAMBDA(doubleFloat);
+CL_DECLARE();
+CL_DOCSTRING("Return the bit representation of a double float in a lisp Integer if possible a Fixnum");
+CL_DEFUN Integer_sp core__double_float_bits(DoubleFloat_sp doubleFloat) {
+  union DoubleFloatConversion {
+        double input;
+        long   output;
+  };
+  DoubleFloatConversion converter;
+  converter.input = doubleFloat->get();
+  long temp = converter.output;
+  if ((temp >= gc::most_negative_fixnum) && (temp <= gc::most_positive_fixnum))
+    return clasp_make_fixnum((gc::Fixnum) temp);
+  else return Bignum_O::create((gc::Fixnum) temp); // (int64_t)?
+}
+
+CL_LAMBDA(bit-representation);
+CL_DECLARE();
+CL_DOCSTRING("Convert a bit representation in a lisp Integer to a double float");
+CL_DEFUN DoubleFloat_sp core__double_float_from_bits(Integer_sp integer) {
+  union DoubleFloatConversion {
+        double input;
+        long   output;
+    };
+  DoubleFloatConversion converter;
+  if (integer.fixnump()) {
+    converter.output = unbox_fixnum(integer);
+    return clasp_make_double_float(converter.input);
+  } else
+  {
+    converter.output = integer->as_long();
+    return clasp_make_double_float(converter.input);
+  }
+};
+
+}
 
 namespace core {
 

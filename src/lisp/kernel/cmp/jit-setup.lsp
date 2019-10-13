@@ -53,6 +53,10 @@
 (eval-when (:load-toplevel :execute)
   (mp:push-default-special-binding 'cmp:*llvm-context* '(llvm-sys:create-llvm-context))
   (mp:push-default-special-binding 'cmp:*primitives* nil)
+  (mp:push-default-special-binding '*debugger-hook* nil)
+  (mp:push-default-special-binding 'core::*handler-clusters* nil)
+  (mp:push-default-special-binding 'core::*restart-clusters* nil)
+  (mp:push-default-special-binding 'core::*condition-restarts* nil)
   (mp:push-default-special-binding 'cmp::*thread-local-builtins-module* nil)
 ;;;  (mp:push-default-special-binding 'cmp::*thread-local-jit-engine* nil)
   ;;; more thread-local special variables may be added in the future
@@ -67,7 +71,7 @@
   (if *use-human-readable-bitcode*
       (let* ((filename (make-pathname :type "ll" :defaults (pathname output-path)))
              (output-name (or (namestring filename)
-                              (error "In write-bitcode the output file for ~a could not be coerced to a namestring")))
+                              (error "In write-bitcode the output file for ~a could not be coerced to a namestring" output-path)))
              (fout (open output-name :direction :output)))
         (unwind-protect
              (llvm-sys:dump-module module fout)
@@ -150,11 +154,23 @@ No DIBuilder is defined for the default module")
 (defun jit-constant-false ()
   (llvm-sys:get-false *llvm-context*))
 
+(defun jit-constant-i<bit-width> (val &key bit-width)
+  "Create an i<numbits> constant in the current context"
+  (unless bit-width (error "You must provide a bit-width"))
+  (let ((ap-arg (llvm-sys:make-apint-width val bit-width nil)))
+    (llvm-sys:constant-int-get *llvm-context* ap-arg)))
+
 (defun jit-constant-i1 (val)
   "Create an i1 constant in the current context"
   (let ((ap-arg (llvm-sys:make-apint1 val)))
     (llvm-sys:constant-int-get *llvm-context* ap-arg)))
 
+
+(defun jit-constant-i3 (val)
+  "Create an i3 constant in the current context"
+    (let ((ap-arg (llvm-sys:make-apint-width val 3 nil)))
+      (llvm-sys:constant-int-get *llvm-context* ap-arg)))
+ 
 (defun jit-constant-i8 (val)
   "Create an i1 constant in the current context"
   (let ((ap-arg (llvm-sys:make-apint-width val 8 nil)))
@@ -540,7 +556,7 @@ The passed module is modified as a side-effect."
 	  t)
 
 
-(defun link-inline-remove-builtins (module)
+#+(or)(defun link-inline-remove-builtins (module)
   (when (>= *optimization-level* 2)
     (with-track-llvm-time
         (link-builtins-module module)
@@ -624,8 +640,10 @@ The passed module is modified as a side-effect."
   (defun jit-add-module-return-function (original-module main-fn startup-fn shutdown-fn literals-list
                                          &key output-path)
     ;; Link the builtins into the module and optimize them
-    (quick-module-dump original-module "before-link-builtins")
-    (link-inline-remove-builtins original-module)
+    #+(or)
+    (progn
+      (quick-module-dump original-module "before-link-builtins")
+      (link-inline-remove-builtins original-module))
     (quick-module-dump original-module "module-before-optimize")
     (let ((module original-module))
       (irc-verify-module-safe module)

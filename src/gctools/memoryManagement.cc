@@ -107,7 +107,7 @@ GC_MANAGED_TYPE(gctools::GCArray_moveable<unsigned char>);
 GC_MANAGED_TYPE(gctools::GCArray_moveable<unsigned int>);
 GC_MANAGED_TYPE(gctools::GCArray_moveable<unsigned long>);
 GC_MANAGED_TYPE(gctools::GCArray_moveable<unsigned short>);
-GC_MANAGED_TYPE(gctools::GCBitUnitArray_moveable<1,unsigned int,int>);
+GC_MANAGED_TYPE(gctools::GCBitUnitArray_moveable<1>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<core::Cons_O>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<core::AuxArgument>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<core::CacheRecord>);
@@ -128,15 +128,13 @@ GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::Instance_O>>
 GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::Creator_O>>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::List_V>>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::Package_O>>);
-GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::SequenceStepper_O>>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::SingleDispatchMethod_O>>);
-GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::SourceFileInfo_O>>);
+GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::FileScope_O>>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::Symbol_O>>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<gctools::smart_ptr<core::T_O>>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<int>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<std::pair<gctools::smart_ptr<core::Symbol_O>,gctools::smart_ptr<core::T_O>>>);
 GC_MANAGED_TYPE(gctools::GCVector_moveable<std::pair<gctools::smart_ptr<core::T_O>,gctools::smart_ptr<core::T_O>>>);
-
 
 namespace gctools {
 void lisp_increment_recursive_allocation_counter(core::ThreadLocalState* thread)
@@ -225,12 +223,13 @@ void clasp_dealloc(char* buffer) {
 
 namespace gctools {
 void rawHeaderDescribe(const uintptr_t *headerP) {
-  uintptr_t headerTag = (*headerP) & Header_s::tag_mask;
+  uintptr_t headerTag = (*headerP) & Header_s::mtag_mask;
   switch (headerTag) {
-  case 0:
+  case Header_s::invalid_tag: {
       printf("  %p : %" PRIuPTR "(%p) %" PRIuPTR "(%p)\n", headerP, *headerP, (void*)*headerP, *(headerP + 1), (void*)*(headerP + 1));
       printf(" Not an object header!\n");
       break;
+  }
   case Header_s::stamp_tag: {
     printf("  %p : %" PRIuPTR " (%p)\n", headerP, *headerP, (void*)*headerP);
     printf("  %p : %" PRIuPTR " (%p)\n", (headerP+1), *(headerP+1), (void*)*(headerP+1));
@@ -336,7 +335,7 @@ size_t random_tail_size() {
 
 void Header_s::signal_invalid_object(const Header_s* header, const char* msg)
 {
-  printf("%s:%d  Invalidate object with header @ %p message: %s\n", __FILE__, __LINE__, (void*)header, msg);
+  printf("%s:%d  Invalid object with header @ %p message: %s\n", __FILE__, __LINE__, (void*)header, msg);
   abort();
 }
 
@@ -348,7 +347,7 @@ void Header_s::validate() const {
 #ifdef DEBUG_GUARD    
     if ( this->guard != 0xFEEAFEEBDEADBEEF) signal_invalid_object(this,"normal object bad header guard");
 #endif
-    if ( this->stamp() > global_NextStamp ) signal_invalid_object(this,"normal object bad header stamp");
+    if ( !(gctools::Header_s::Value::is_shifted_stamp(this->header._value))) signal_invalid_object(this,"normal object bad header stamp");
 #ifdef DEBUG_GUARD
     if ( this->_tail_start & 0xffffffffff000000 ) signal_invalid_object(this,"bad tail_start");
     if ( this->_tail_size & 0xffffffffff000000 ) signal_invalid_object(this,"bad tail_size");
@@ -380,7 +379,7 @@ namespace gctools {
   global_NextBuiltInStamp starts at STAMP_max+1
   so that it doesn't use any stamps that correspond to KIND values
    assigned by the static analyzer. */
-std::atomic<Stamp>   global_NextStamp = ATOMIC_VAR_INIT(STAMP_max+1);
+std::atomic<UnshiftedStamp>   global_NextUnshiftedStamp = ATOMIC_VAR_INIT(Header_s::Value::first_NextUnshiftedStamp(STAMP_max+1));
 
 void OutOfStamps() {
     printf("%s:%d Hello future entity!  Congratulations! - you have run clasp long enough to run out of STAMPs - %" Ptagged_stamp_t " are allowed - change the clasp header layout or add another word for the stamp\n", __FILE__, __LINE__, Header_s::largest_possible_stamp );
@@ -435,7 +434,7 @@ int handleFatalCondition() {
     // Do nothing
     printf("Caught TerminateProgramIfBatch in %s:%d\n", __FILE__, __LINE__);
   } catch (core::CatchThrow &ee) {
-    _lisp->print(BF("%s:%d Uncaught THROW frame[%s] - this should NEVER happen - the stack should never be unwound unless there is a CATCH clause that matches the THROW") % __FILE__ % __LINE__ % ee.getFrame());
+    _lisp->print(BF("%s:%d Uncaught THROW tag[%s] - this should NEVER happen - the stack should never be unwound unless there is a CATCH clause that matches the THROW") % __FILE__ % __LINE__ % ee.getTag());
   } catch (core::Unwind &ee) {
     _lisp->print(BF("At %s:%d - Unwind caught frame: %d index: %d") % __FILE__ % __LINE__ % ee.getFrame() % ee.index());
   } catch (HardError &ee) {
@@ -589,7 +588,7 @@ void shutdown_gcroots_in_module(GCRootsInModule* roots) {
 }
 
 CL_DEFUN Fixnum gctools__nextStampValue() {
-  return global_NextStamp;
+  return Header_s::Value::shift_unshifted_stamp(global_NextUnshiftedStamp);
 }
 
 CL_LAMBDA(address args);

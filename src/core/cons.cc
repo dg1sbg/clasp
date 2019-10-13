@@ -309,12 +309,6 @@ List_sp Cons_O::member1(T_sp item, T_sp key, T_sp test, T_sp testNot) const {
   return ((_Nil<T_O>()));
 }
 
-CL_DEFUN void core__test_proper_list(T_sp l) {
-  for (auto cur : (List_sp) l) {
-    printf("%s:%d  element cur -> %s  consp -> %d\n", __FILE__, __LINE__, _rep_(cur).c_str(), cur.consp());
-  }
-}
-
 List_sp Cons_O::assoc(T_sp item, T_sp key, T_sp test, T_sp testNot) const {
   _OF();
   Tester t(item, key, test, testNot, false);
@@ -661,9 +655,20 @@ List_sp Cons_O::copyTreeCar() const {
   return ((rootCopy));
 }
 
+CL_DEFUN size_t core__cons_length(Cons_sp cons) {
+  size_t sz = 1;
+  T_sp cur;
+  for (cur = oCdr(cons); cur.consp(); cur = gc::As_unsafe<Cons_sp>(cur)->_Cdr) ++sz;
+  if (cur.notnilp()) {
+    TYPE_ERROR_PROPER_LIST(cur->asSmartPtr());
+  }
+  return sz;
+};
+
+// FIXME: Redundant
 size_t Cons_O::length() const {
   size_t sz = 1;
-  T_sp cur = _Nil<T_O>();
+  T_sp cur;
   for (cur = this->_Cdr; cur.consp(); cur = gc::As_unsafe<Cons_sp>(cur)->_Cdr) ++sz;
   if (cur.notnilp()) {
     TYPE_ERROR_PROPER_LIST(cur->asSmartPtr());
@@ -736,7 +741,7 @@ CL_DEFUN List_sp core__alist_assoc_eql(List_sp alist, T_sp key) {
 }
 
 
-
+SYMBOL_EXPORT_SC_(CorePkg, cons_length);
 SYMBOL_EXPORT_SC_(ClPkg, make_list);
   SYMBOL_EXPORT_SC_(ClPkg, cons);
   SYMBOL_EXPORT_SC_(ClPkg, getf);

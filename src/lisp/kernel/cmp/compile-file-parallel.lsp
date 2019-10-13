@@ -20,7 +20,8 @@
 (defmacro cfp-log (fmt &rest args)
   nil)
 
-(defstruct (ast-job (:type vector) :named) ast environment dynenv form-output-path form-index error current-source-pos-info)
+(defstruct (ast-job (:type vector) :named)
+  ast environment dynenv form-output-path form-index error current-source-pos-info)
 
 (defun compile-from-ast (job &key
                                optimize
@@ -36,20 +37,19 @@
                                       :pathname *compile-file-truename*)
             (with-make-new-run-all (run-all-function (namestring (ast-job-form-output-path job)))
               (with-literal-table
-                  (let ((clasp-cleavir::*llvm-metadata* (make-hash-table :test 'eql)))
-                    (core:with-memory-ramp (:pattern 'gctools:ramp)
-                      (literal:with-top-level-form
-                          (let ((hoisted-ast (clasp-cleavir::hoist-ast
-                                              (ast-job-ast job)
-                                              (ast-job-dynenv job))))
-                            (clasp-cleavir::translate-hoisted-ast hoisted-ast :env (ast-job-environment job)))))))
+                  (core:with-memory-ramp (:pattern 'gctools:ramp)
+                    (literal:with-top-level-form
+                        (let ((hoisted-ast (clasp-cleavir::hoist-ast
+                                            (ast-job-ast job)
+                                            (ast-job-dynenv job))))
+                          (clasp-cleavir::translate-hoisted-ast hoisted-ast :env (ast-job-environment job))))))
               (make-boot-function-global-variable module run-all-function :position (ast-job-form-index job))))
           (cmp-log "About to verify the module%N")
           (cmp-log-dump-module module)
           (irc-verify-module-safe module)
           (quick-module-dump module (format nil "preoptimize~a" (ast-job-form-index job)))
           ;; ALWAYS link the builtins in, inline them and then remove them.
-          (link-inline-remove-builtins module))
+          #+(or)(link-inline-remove-builtins module))
         (cond
           ((eq intermediate-output-type :object)
            (let ((object-file-path (make-pathname :type "o" :defaults (ast-job-form-output-path job))))
@@ -98,8 +98,7 @@
                        output-path
                        working-dir
                        (intermediate-output-type :object) ; or :bitcode
-                       ast-only
-                       verbose)
+                       ast-only)
   (let (result
         (form-index (core:next-startup-position))
         (eof-value (gensym))
@@ -127,8 +126,6 @@
                       (*package* . ',*package*)
                       (*compile-file-pathname* . ',*compile-file-pathname*)
                       (*compile-file-truename* . ',*compile-file-truename*)
-                      (*source-debug-pathname* . ',*source-debug-pathname*)
-                      (*source-debug-offset* . ',*source-debug-offset*)
                       #+cclasp(cleavir-generate-ast:*compiler* . ',cleavir-generate-ast:*compiler*)
                       #+cclasp(core:*use-cleavir-compiler* . ',core:*use-cleavir-compiler*)
                       (cmp::*global-function-refs* . ',cmp::*global-function-refs*))))))
@@ -137,7 +134,7 @@
              ;; Required to update the source pos info. FIXME!?
              (peek-char t source-sin nil)
              ;; FIXME: if :environment is provided we should probably use a different read somehow
-             (let* ((current-source-pos-info (core:input-stream-source-pos-info source-sin))
+             (let* ((current-source-pos-info (compile-file-source-pos-info source-sin))
                     (core:*current-source-pos-info* current-source-pos-info)
                     (form-output-path
                       (make-pathname
@@ -202,20 +199,15 @@
                                  output-type
                                  output-path
                                  working-dir
-                                 source-debug-pathname
-                                 (source-debug-offset 0)
                                  environment
                                  (optimize t)
                                  (optimize-level *optimization-level*)
-                                 verbose
                                  ast-only
                                  dry-run)
   "* Arguments
 - given-input-pathname :: A pathname.
 - output-path :: A pathname.
 - compile-file-hook :: A function that will do the compile-file
-- source-debug-pathname :: A pathname.
-- source-debug-offset :: An integer.
 - environment :: Arbitrary, passed only to hook
 Compile a lisp source file into an LLVM module."
   ;; TODO: Save read-table and package with unwind-protect
@@ -229,31 +221,20 @@ Compile a lisp source file into an LLVM module."
          (source-sin (open given-input-pathname :direction :input))
          warnings-p failure-p)
     (with-open-stream (sin source-sin)
-      ;; If a truename is provided then spoof the file-system to treat input-pathname
-      ;; as source-truename with the given offset
-      (when source-debug-pathname
-        (core:source-file-info (namestring given-input-pathname) source-debug-pathname source-debug-offset nil))
       (when *compile-verbose*
         (bformat t "; Compiling file parallel: %s%N" (namestring given-input-pathname)))
-      (let* ((*compilation-module-index* 0)
-             (*compile-file-pathname* (pathname (merge-pathnames given-input-pathname)))
-             (*compile-file-truename* (translate-logical-pathname *compile-file-pathname*)))
-        (with-source-pathnames (:source-pathname *compile-file-truename* ;(namestring source-location)
-                                :source-debug-pathname source-debug-pathname
-                                :source-debug-offset source-debug-offset)
-          (let ((intermediate-output-type (case output-type
-                                            (:fasl :object)
-                                            (:object :object)
-                                            (:bitcode :bitcode))))
-            (cclasp-loop2 given-input-pathname source-sin environment
-                          :dry-run dry-run
-                          :optimize optimize
-                          :optimize-level optimize-level
-                          :working-dir working-dir
-                          :output-path output-path
-                          :intermediate-output-type intermediate-output-type
-                          :ast-only ast-only
-                          :verbose verbose)))))))
+      (let ((intermediate-output-type (case output-type
+                                        (:fasl :object)
+                                        (:object :object)
+                                        (:bitcode :bitcode))))
+        (cclasp-loop2 given-input-pathname source-sin environment
+                      :dry-run dry-run
+                      :optimize optimize
+                      :optimize-level optimize-level
+                      :working-dir working-dir
+                      :output-path output-path
+                      :intermediate-output-type intermediate-output-type
+                      :ast-only ast-only)))))
 
 (defun cfp-result-files (result extension)
   (mapcar (lambda (name)
@@ -286,17 +267,15 @@ Compile a lisp source file into an LLVM module."
 (defun compile-file-parallel (input-file
                               &key
                                 (output-file nil output-file-p)
-                                (verbose *compile-verbose*)
-                                (print *compile-print*)
+                                ((:verbose *compile-verbose*) *compile-verbose*)
+                                ((:print *compile-print*) *compile-print*)
                                 (optimize t)
                                 (optimize-level *optimization-level*)
                                 (external-format :default)
-                                ;; If we are spoofing the source-file system to treat given-input-name
-                                ;; as a part of another file then use source-debug-pathname to provide the
-                                ;; truename of the file we want to mimic
-                                source-debug-pathname
-                                ;; This is the offset we want to spoof
-                                (source-debug-offset 0)
+                                ;; Used for C-c C-c in SLIME.
+                                (source-debug-pathname nil cfsdpp)
+                                ((:source-debug-offset *compile-file-source-debug-offset*) 0)
+                                ((:source-debug-lineno *compile-file-source-debug-lineno*) 0)
                                 ;; output-type can be (or :fasl :bitcode :object)
                                 (output-type :fasl)
                                 ;; type can be either :kernel or :user (FIXME? unused)
@@ -309,30 +288,30 @@ Compile a lisp source file into an LLVM module."
   "See CLHS compile-file."
   (if (not output-file-p) (setq output-file (cfp-output-file-default input-file output-type)))
   (with-compiler-env ()
-    ;; Do the different kind of compile-file here
-    (let* ((*compile-print* print)
-           (*compile-verbose* verbose)
-           (input-pathname (or (probe-file input-file)
+    (let* ((input-pathname (or (probe-file input-file)
                                (error 'core:simple-file-error
                                       :pathname input-file
                                       :format-control "compile-file-to-module could not find the file ~s to open it"
                                       :format-arguments (list input-file))))
-           (output-path (compile-file-pathname input-file :output-file output-file :output-type output-type ))
-           (working-dir (core:mkdtemp (namestring output-path)))
+           (output-path (compile-file-pathname input-file :output-file output-file :output-type output-type))
+           (working-dir (core:mkdtemp (namestring output-path)))(*compilation-module-index* 0)
+           (*compile-file-pathname* (pathname (merge-pathnames input-file)))
+           (*compile-file-truename* (translate-logical-pathname *compile-file-pathname*))
+           (*compile-file-source-debug-pathname*
+             (if cfsdpp source-debug-pathname *compile-file-truename*))
+           (*compile-file-file-scope*
+             (core:file-scope *compile-file-source-debug-pathname*))
            (*compile-file-output-pathname* output-path))
-      (with-compiler-timer (:message "Compile-file-parallel" :report-link-time t :verbose verbose)
+      (with-compiler-timer (:message "Compile-file-parallel" :report-link-time t :verbose *compile-verbose*)
         (with-compilation-results ()
           (let ((result (compile-file-to-result input-pathname
                                                 :output-type output-type
                                                 :output-path output-path
-                                                :source-debug-pathname source-debug-pathname
-                                                :source-debug-offset source-debug-offset
                                                 :working-dir working-dir
                                                 :compile-file-hook *cleavir-compile-file-hook*
                                                 :environment environment
                                                 :optimize optimize
                                                 :optimize-level optimize-level
-                                                :verbose verbose
                                                 :ast-only ast-only
                                                 :dry-run dry-run)))
             (cf2-log "Came out of compile-file-to-result with result: ~s~%" result)

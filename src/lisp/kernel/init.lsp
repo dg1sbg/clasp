@@ -17,17 +17,6 @@
           debug-break))
 (export '*trace-startup*)
 
-;;; ------------------------------------------------------------
-;;;
-;;;   Turn on flow tracker
-;;;
-
-#+debug-flow-tracker
-(if (member :flow-tracker *features*)
-    (progn
-      (core:bformat t "Turning flow-tracker on%N")
-      (gctools:flow-tracker-on)))
-
 
 ;;; ------------------------------------------------------------
 ;;;
@@ -43,6 +32,53 @@
 (sys:*make-special 'core::*clang-bin*)
 (export 'core::*clang-bin*)
 
+;;; ------------------------------------------------------------
+;;;
+;;;   Turn on flow tracker
+;;;
+
+#+debug-flow-tracker
+(if (member :flow-tracker *features*)
+    (progn
+      (core:bformat t "Turning flow-tracker on%N")
+      (gctools:flow-tracker-on)))
+
+
+;;; ------------------------------------------------------------
+;;;
+;;;   Sanity check that stamps are working properly
+;;;
+
+(eval-when (:compile-toplevel :execute)
+  (let* ((obj "asdf")
+         (stamp (core:instance-stamp obj))
+         (class-stamp (core:class-stamp-for-instances (core:instance-class obj)))
+         (map-stamp (gethash (core:name-of-class (core:instance-class obj)) core:+type-header-value-map+)))
+    (if (not (numberp stamp))
+        (progn
+          (core:bformat t "Sanity check failure stamp %s must be a number%N" stamp)
+          (core:cabort))
+        (if (not (numberp class-stamp))
+            (progn
+              (core:bformat t "Sanity check failure class-stamp %s must be a number%N" class-stamp)
+              (core:cabort))
+            (if (not (numberp map-stamp))
+                (progn
+                  (core:bformat t "Sanity check failure map-stamp %s must be a number%N" map-stamp)
+                  (finish-output)
+                  (core:cabort)))))
+    (if (not (= stamp class-stamp))
+        (progn
+          (core:bformat t "For object %s there is a mismatch between the stamp %s and the class-stamp %s%N"
+                        obj stamp class-stamp)
+          (finish-output)
+          (core:cabort))
+        (if (not (= stamp map-stamp))
+            (progn
+              (core:bformat t "For object %s there is a mismatch between the stamp %s and the class-stamp %s%N"
+                            obj stamp class-stamp)
+              (finish-output)
+              (core:cabort))))))
 
 ;; When boostrapping in stages, set this feature,
 ;; it guarantees that everything that is declared at compile/eval time
@@ -88,7 +124,7 @@
     nil
     (setq *compile-debug-dump-module* nil))
 (setq *debug-compile-file* (member :debug-compile-file *features*))
-(export '(*compile-file-debug-dump-module* *compile-debug-dump-module*))
+(export '(*compile-file-debug-dump-module* *compile-debug-dump-module* *use-human-readable-bitcode*))
 (use-package :core)
 
 (eval-when (:execute :compile-toplevel :load-toplevel)
@@ -139,17 +175,15 @@
           load-encoding
           make-encoding
           assume-right-type
-          short-float-positive-infinity
-          short-float-negative-infinity
-          single-float-positive-infinity
-          single-float-negative-infinity
-          double-float-positive-infinity
-          double-float-negative-infinity
-          long-float-positive-infinity
-          long-float-negative-infinity
           assert-error
           float-nan-p
-          float-infinity-p))
+          float-infinity-p
+          character-coding-error
+          character-encoding-error
+          character-decoding-error
+          stream-encoding-error
+          stream-decoding-error
+          generate-encoding-hashtable))
 (core:*make-special '*module-provider-functions*)
 (core:*make-special '*source-location*)
 (setq *source-location* nil)

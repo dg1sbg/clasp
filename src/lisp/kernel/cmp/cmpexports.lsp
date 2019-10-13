@@ -1,8 +1,11 @@
 (in-package :cmp)
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (export '(
+            with-debug-info-source-position
             with-interpreter
             module-report
+            *track-inlined-functions*
+            *track-inlinee-name*
             *debug-link-options* ;; A list of strings to inject into link commands
             *compile-file-debug-dump-module* ;; Dump intermediate modules
             *compile-debug-dump-module* ;; Dump intermediate modules
@@ -17,6 +20,7 @@
             irc-function-create
             irc-bclasp-function-create
             irc-cclasp-function-create
+            +c++-stamp-max+
             %fn-prototype%
             +fn-prototype-argument-names+
             %fn-prototype*%
@@ -53,6 +57,11 @@
             +single-float-tag+
             +character-tag+
             +general-tag+
+            +where-tag-mask+
+            +derivable-where-tag+
+            +rack-where-tag+
+            +wrapped-where-tag+
+            +header-where-tag+
             *startup-primitives-as-list*
             %i1%
             %exception-struct%
@@ -123,6 +132,7 @@
             compiler-message-file-position
             warn-undefined-global-variable
             warn-undefined-type
+            warn-cannot-coerce
             warn-invalid-number-type
             warn-icsp-iesp-both-specified
             register-global-function-def
@@ -144,6 +154,7 @@
             alloca-i8
             alloca-i8*
             alloca-i32
+            alloca-size_t
             alloca-return
             alloca-va_list
             alloca-temp-values
@@ -186,9 +197,19 @@
             irc-undef-value-get
             irc-store
             irc-struct-gep
+            irc-read-slot
+            irc-write-slot
+            irc-make-tmv
+            irc-tmv-primary
+            irc-tmv-nret
             irc-t*-result
             irc-tmv-result
+            irc-header-stamp
+            irc-rack-stamp
+            irc-wrapped-stamp
+            irc-derivable-stamp
             irc-switch
+            irc-add-case
             irc-tag-fixnum
             irc-trunc
             irc-unreachable
@@ -197,6 +218,15 @@
             irc-untag-cons
             irc-fdefinition
             irc-setf-fdefinition
+            irc-real-array-displacement
+            irc-real-array-index-offset
+            irc-array-total-size
+            irc-array-rank
+            gen-%array-dimension
+            irc-vaslist-va_list-address
+            irc-vaslist-remaining-nargs-address
+            gen-vaslist-pop
+            gen-vaslist-length
             jit-constant-i1
             jit-constant-i8
             jit-constant-i32
@@ -215,7 +245,6 @@
             initialize-calling-convention
             treat-as-special-operator-p
             typeid-core-unwind
-            walk-form-for-source-info
             with-begin-end-catch
             preserve-exception-info
             *dbg-generate-dwarf*
@@ -225,9 +254,14 @@
             with-new-function
             with-dbg-function
             with-dbg-lexical-block
-            dbg-clear-irbuilder-source-location-impl
-            dbg-set-irbuilder-source-location-impl
             dbg-set-current-source-pos
+            compile-file-source-pos-info
+            c++-field-offset
+            c++-field-index
+            c++-struct-type
+            c++-struct*-type
+            c++-field-ptr
+            %closure-with-slots%.offset-of[n]/t*
             with-try
             with-new-function-prepare-for-try
             with-debug-info-generator
@@ -249,13 +283,13 @@
             compile-throw-if-excess-keyword-arguments
             *irbuilder-function-alloca*
             irc-constant-string-ptr
-            *source-debug-pathname*
-            *source-debug-offset*
             irc-get-terminate-landing-pad-block
             irc-function-cleanup-and-return
             %RUN-AND-LOAD-TIME-VALUE-HOLDER-GLOBAL-VAR-TYPE%
             codegen-startup-shutdown
             compute-rest-alloc
+            compile-tag-check
+            compile-header-check
             )))
 
 ;;; exports for runall
@@ -274,7 +308,8 @@
           undefined-variable-warning
           undefined-function-warning
           undefined-type-warning
-          redefined-function-warning))
+          redefined-function-warning
+          compiler-macro-expansion-error-warning))
 
 (in-package :literal)
 

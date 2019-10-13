@@ -213,8 +213,7 @@ CL_LAMBDA(ht);
 CL_DECLARE();
 CL_DOCSTRING("hash_table_weakness");
 CL_DEFUN Symbol_sp core__hash_table_weakness(T_sp ht) {
-  if (WeakKeyHashTable_sp wkht = ht.asOrNull<WeakKeyHashTable_O>()) {
-    (void)wkht;
+  if (gc::IsA<WeakKeyHashTable_sp>(ht)) {
     return kw::_sym_key;
   }
   return _Nil<Symbol_O>();
@@ -478,8 +477,8 @@ void HashTable_O::sxhash_equalp(HashGenerator &hg, T_sp obj, LocationDependencyP
       hg.addPart(std::abs(::floor(obj.unsafe_single_float())));
     return;
   } else if (obj.characterp()) {
-    if (hg.isFilling())
-      hg.addPart(obj.unsafe_character());
+    if (hg.isFilling()) 
+      hg.addPart(claspCharacter_upcase(clasp_as_claspCharacter(gc::As<Character_sp>(obj))));
     return;
   } else if (obj.consp()) {
     Cons_sp cobj = gc::As_unsafe<Cons_sp>(obj);

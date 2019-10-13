@@ -159,13 +159,12 @@ namespace core {
   // ------------------------------------------------------------
   // Utility
 
-  [[noreturn]] void bitVectorDoesntSupportError();
   [[noreturn]] void missingValueListError(List_sp indices);
   [[noreturn]] void tooManyIndicesListError(List_sp indices);
   [[noreturn]] void missingValueVaListError(VaList_sp indices);
   [[noreturn]] void tooManyIndicesVaListError(VaList_sp indices);
   [[noreturn]] void badAxisNumberError(Symbol_sp fn_name, size_t rank, size_t axisNumber);
-  [[noreturn]] void badIndexError(size_t oneIndex, size_t curDimension);
+  [[noreturn]] void badIndexError(T_sp arr, size_t axis, size_t oneIndex, size_t curDimension);
   [[noreturn]] void indexNotFixnumError(T_sp index);
   [[noreturn]] void insufficientIndexListError(List_sp indices);
   [[noreturn]] void insufficientIndexVaListError(VaList_sp indices);
@@ -174,16 +173,14 @@ namespace core {
   [[noreturn]] void notSequenceError(T_sp obj);
   [[noreturn]] void noFillPointerError(Symbol_sp fn_name, T_sp array);
   [[noreturn]] void noFillPointerSpecializedArrayError(T_sp array);
-  [[noreturn]] void vectorNotArrayError(Symbol_sp fn_name, T_sp array);
   [[noreturn]] void notAdjustableError(Symbol_sp fn_name, T_sp array);
   [[noreturn]] void notVectorError(T_sp array);
-  bool ranged_bit_vector_EQ_(const SimpleBitVector_O& x, const SimpleBitVector_O& y, size_t startx, size_t endx, size_t starty, size_t endy );
 
   template <typename T1,typename T2>
     bool template_string_EQ_equal(const T1& string1, const T2& string2, size_t start1, size_t end1, size_t start2, size_t end2)
   {
-    const typename T1::simple_element_type* cp1(&string1[start1]);
-    const typename T2::simple_element_type* cp2(&string2[start2]);
+    const typename T1::simple_element_type* cp1((const typename T1::simple_element_type*)string1.rowMajorAddressOfElement_(start1));
+    const typename T2::simple_element_type* cp2((const typename T2::simple_element_type*)string2.rowMajorAddressOfElement_(start2));
     size_t num1 = end1 - start1;
     size_t num2 = end2 - start2;
 //    printf("%s:%d:%s string1@%p string2=@%p sizeof(*cp1)=%lu sizeof(*cp2)=%lu cp1=%p cp2=%p start1=%lu end1=%lu start2=%lu end2=%lu num1=%lu num2=%lu\n", __FILE__, __LINE__, __FUNCTION__, (void*)&string1, (void*)&string2, sizeof(*cp1), sizeof(*cp2), (void*)cp1, (void*)cp2, start1, end1, start2, end2, num1, num2);
@@ -347,8 +344,6 @@ namespace core {
     virtual Array_sp unsafe_subseq(size_t start, size_t end) const = 0;
     virtual Array_sp unsafe_setf_subseq(size_t start, size_t end, Array_sp newSubseq) = 0;
     virtual void unsafe_fillArrayWithElt(T_sp initial_element, size_t start, size_t end) = 0;
-
-    virtual Array_sp create_result_bitarray (SimpleBitVector_sp x) const { SUBIMP(); };
   };
 
 
@@ -459,6 +454,7 @@ namespace core {
 };
 
 namespace core {
+FORWARD(ComplexVector);
 class ComplexVector_O : public MDArray_O {
     LISP_CLASS(core, CorePkg, ComplexVector_O, "ComplexVector",MDArray_O);
     // One dimension vector
@@ -510,11 +506,15 @@ namespace core {
     virtual size_t arrayTotalSize() const { return this->length(); };
     virtual void rowMajorAset(size_t idx, T_sp value) = 0;
     virtual T_sp rowMajorAref(size_t idx) const = 0;
+    virtual void vset(size_t idx, T_sp value) = 0;
+    virtual T_sp vref(size_t idx) const = 0;
     virtual size_t rank() const override { return 1; };
     virtual bool adjustableArrayP() const final {return false;};
     virtual size_t displacedIndexOffset() const override { return 0; };
     virtual size_t arrayDimension(size_t axisNumber) const override {
-      unlikely_if (axisNumber!=0) { vectorNotArrayError(cl::_sym_arrayDimension,this->asSmartPtr()); }
+      unlikely_if (axisNumber!=0) {
+        badAxisNumberError(cl::_sym_arrayDimension,1,axisNumber);
+      }
       return this->length();
     }
     virtual T_sp vectorPush(T_sp newElement) override {noFillPointerError(cl::_sym_vectorPush,this->asSmartPtr());  };
@@ -555,8 +555,8 @@ namespace core {
     static void never_invoke_allocator() {gctools::GCAbstractAllocator<template_SimpleVector>::never_invoke_allocator();};
   public:
     // NULL terminated strings use this - so the ASSERT needs to accept it
-    value_type& operator[](size_t index) { BOUNDS_ASSERT(index<this->length());return this->_Data[index];};
-    const value_type& operator[](size_t index) const { BOUNDS_ASSERT(index<this->length());return this->_Data[index];};
+    value_type& operator[](size_t index) { BOUNDS_ASSERT_LT(index,this->length());return this->_Data[index];};
+    const value_type& operator[](size_t index) const { BOUNDS_ASSERT_LT(index,this->length());return this->_Data[index];};
     iterator begin() { return &this->_Data[0];};
     iterator end() { return &this->_Data[this->_Data._Length]; }
     const_iterator begin() const { return &this->_Data[0];};
@@ -582,9 +582,11 @@ namespace core {
     virtual Array_sp nreverse() final { return templated_ranged_nreverse(*this,0,this->length()); };
     CL_METHOD_OVERLOAD virtual void rowMajorAset(size_t idx, T_sp value) final {(*this)[idx] = leaf_type::from_object(value);}
     CL_METHOD_OVERLOAD virtual T_sp rowMajorAref(size_t idx) const final {return leaf_type::to_object((*this)[idx]);}
+    CL_METHOD_OVERLOAD virtual void vset(size_t idx, T_sp value) final {(*this)[idx] = leaf_type::from_object(value);}
+    CL_METHOD_OVERLOAD virtual T_sp vref(size_t idx) const final {return leaf_type::to_object((*this)[idx]);}
     virtual Array_sp unsafe_subseq(size_t start, size_t end) const final {
       BOUNDS_ASSERT(start<=end&&end<=this->length());
-      return leaf_type::make(end-start,value_type(),true,end-start,&(*this)[start]);
+      return leaf_type::make(end-start,value_type(),true,end-start,(value_type*)this->rowMajorAddressOfElement_(start));
     }
     virtual Array_sp unsafe_setf_subseq(size_t start, size_t end, Array_sp newSubseq) final {
       // TODO: Write specialized versions of this to speed it up
@@ -822,116 +824,6 @@ namespace core {
     virtual bool equal(T_sp other) const override { return this->eq(other);};
   };
 };
-
-namespace core { class SimpleBitVector_O; };
-template <>
-struct gctools::GCInfo<core::SimpleBitVector_O> {
-  static bool constexpr NeedsInitialization = false;
-  static bool constexpr NeedsFinalization = false;
-  static GCInfo_policy constexpr Policy = atomic;
-};
-namespace core {
-  class SimpleBitVector_O : public AbstractSimpleVector_O {
-    LISP_CLASS(core, ClPkg, SimpleBitVector_O, "simple-bit-vector",AbstractSimpleVector_O);
-    virtual ~SimpleBitVector_O() {};
-  public:
-    typedef gctools::GCBitUnitArray_moveable<1> bitunit_array_type;
-    typedef typename bitunit_array_type::word_type value_type;
-    typedef uint bit_element_type;
-    static const size_t BitWidth = bitunit_array_type::number_of_bit_units_in_word;
-  public:
-    bitunit_array_type _Data;
-  SimpleBitVector_O(size_t length,
-                    value_type initialElement,
-                    bool initialElementSupplied,
-                    size_t initialContentsSize=0,
-                    value_type* initialContents=NULL )
-    : Base(), _Data(length,initialElement,initialElementSupplied,initialContentsSize,initialContents) {};
-    static SimpleBitVector_sp make( size_t length,
-                                    value_type initialElement=0,
-                                    bool initialElementSupplied=false,
-                                    size_t initialContentsSize=0,
-                                    value_type* initialContents=NULL) {
-      auto sbv = gctools::GC<SimpleBitVector_O>::allocate_bitunit_container(length,initialElement,initialElementSupplied,initialContentsSize,initialContents);
-      return sbv;
-    }
-    static SimpleBitVector_sp make(const string& bv);
-  public:
-    static value_type default_initial_element(void) {return 0;}
-    static value_type initial_element_from_object(T_sp initialElement, bool initialElementSupplied) {
-      if (initialElementSupplied) {
-        if (initialElement.fixnump()) {
-          value_type i = initialElement.unsafe_fixnum();
-          if (i==0||i==1) return i;
-        }
-        TYPE_ERROR(initialElement,cl::_sym_bit);
-      }
-      return 0;
-    }
-    static value_type from_object(T_sp object) {
-      if (object.fixnump()) {
-        value_type i = object.unsafe_fixnum();
-        if (i==0||i==1) return i;
-      }
-      TYPE_ERROR(object, cl::_sym_bit);
-    }
-    static T_sp to_object(const value_type& v) { return clasp_make_integer(v); };
-  public:
-    virtual T_sp type_of() const final { return Cons_O::createList(cl::_sym_simple_bit_vector,clasp_make_fixnum(this->length()));};
-    virtual T_sp array_type() const final { return cl::_sym_simple_array; };
-    virtual T_sp element_type() const override { return cl::_sym_bit; };
-  public:
-    virtual clasp_elttype elttype() const { return clasp_aet_bit; };
-    virtual T_sp arrayElementType() const override { return cl::_sym_bit; };
-  public:
-      Array_sp create_result_bitarray(SimpleBitVector_sp data) {
-        return data;
-      }
-
-    void asAbstractSimpleVectorRange(AbstractSimpleVector_sp& sv, size_t& start, size_t& end) const override {
-      sv = this->asSmartPtr();
-      start = 0;
-      end = this->length();
-    }
-    void setBit(size_t idx, uint v) {this->_Data.unsignedSetBitUnit(idx,v);}
-    uint testBit(size_t idx) const {return this->_Data.unsignedBitUnit(idx);};
-  public:
-    // Implement these methods for simple vectors - some are implemented in parent classes
-    // for convenience if not speed
-    virtual void __write__(T_sp strm) const final;
-    virtual size_t elementSizeInBytes() const override {bitVectorDoesntSupportError();};
-    virtual void* rowMajorAddressOfElement_(size_t i) const override {bitVectorDoesntSupportError();};
-    value_type* bytes() { return &this->_Data[0]; };
-    virtual Array_sp reverse() const final;
-    virtual Array_sp nreverse() final;
-    virtual bool equal(T_sp other) const final;
-    virtual bool equalp(T_sp other) const final {return this->equal(other);};
-    virtual Array_sp unsafe_subseq(size_t start, size_t end) const final;
-    virtual Array_sp unsafe_setf_subseq(size_t start, size_t end, Array_sp newSubseq) override;
-    virtual vector<size_t> arrayDimensionsAsVector() const final {
-      vector<size_t> dims;
-      dims.push_back(this->length());
-      return dims;
-    }
-    virtual void unsafe_fillArrayWithElt(T_sp initialElement, size_t start, size_t end) final;
-  public:
-    CL_METHOD_OVERLOAD virtual void rowMajorAset(size_t idx, T_sp value) final {this->setBit(idx,value.unsafe_fixnum());};
-    CL_METHOD_OVERLOAD virtual T_sp rowMajorAref(size_t idx) const final {return clasp_make_fixnum(this->testBit(idx)); };
-    virtual void sxhash_(HashGenerator& hg) const final {this->ranged_sxhash(hg,0,this->length());}
-    virtual void ranged_sxhash(HashGenerator& hg, size_t start, size_t end) const final {
-      if (hg.isFilling()) {
-        Fixnum hash = 5381;
-        Fixnum c;
-        for ( size_t i(start); i<end; ++i ) {
-          uint c = this->testBit(i);
-          hash = ((hash << 5) + hash) + c;
-        }
-        hg.addPart(hash);
-      }
-    }
-  };
-};
-
 
 namespace core {
   Vector_sp core__make_vector(T_sp element_type,
@@ -1314,6 +1206,7 @@ namespace core {
     virtual clasp_elttype elttype() const { return clasp_aet_bc; };
   public:
     virtual bool equal(T_sp other) const final;
+    virtual bool equalp(T_sp other) const final;
   public:
     iterator begin() { return &(*this)[0]; };
     iterator end() { return &(*this)[this->length()]; };
@@ -1371,6 +1264,7 @@ namespace core {
     virtual clasp_elttype elttype() const { return clasp_aet_ch; };
   public:
     virtual bool equal(T_sp other) const final;
+    virtual bool equalp(T_sp other) const final;
   public:
     iterator begin() { return &(*this)[0]; };
     iterator end() { return &(*this)[this->length()]; };
@@ -1389,83 +1283,6 @@ namespace core {
     SimpleString_sp asMinimalSimpleString() const final;
   };
 };
-
-
-
-namespace core {
-  // I can't use the template_Array here because of bitwise access
-  class BitVectorNs_O : public ComplexVector_O {
-    LISP_CLASS(core, CorePkg, BitVectorNs_O, "BitVectorNs",ComplexVector_O);
-    virtual ~BitVectorNs_O() {};
-  public:
-    typedef SimpleBitVector_O simple_type;
-  BitVectorNs_O(size_t dummy_rank_1,
-                size_t dimension,
-                T_sp fillPointer,
-                Array_sp data,
-                bool displacedToP,
-                Fixnum_sp displacedIndexOffset)
-    : Base(Rank1(),dimension,fillPointer,data,displacedToP,displacedIndexOffset) {};
-    static BitVectorNs_sp make(size_t length, SimpleBitVector_O::value_type initialElement, bool initialElementSuppliedP, T_sp fillPointer, T_sp dataOrDisplacedTo, bool displacedToP, Fixnum_sp displacedIndexOffset ) {
-//      GC_ALLOCATE_VARIADIC(BitVectorNs_O, bv, length, fillPointer, displacedTo, displacedIndexOffset );
-      LIKELY_if (dataOrDisplacedTo.nilp()) {
-        dataOrDisplacedTo = SimpleBitVector_O::make(length,initialElement,initialElementSuppliedP);
-      }
-      auto bv = gctools::GC<BitVectorNs_O>::allocate_container(false,1,length,fillPointer,gc::As<Array_sp>(dataOrDisplacedTo),displacedToP,displacedIndexOffset);
-      return bv;
-    }
-  public:
-    virtual void __write__(T_sp strm) const;
-    uint testBit(size_t idx) const {
-      AbstractSimpleVector_sp bme;
-      size_t mstart, mend;
-      this->asAbstractSimpleVectorRange(bme,mstart,mend);
-      simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-      return me->testBit(idx+this->_DisplacedIndexOffset);
-    }
-    void setBit(size_t idx, uint v)  {
-      AbstractSimpleVector_sp bme;
-      size_t mstart, mend;
-      this->asAbstractSimpleVectorRange(bme,mstart,mend);
-      simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-      me->setBit(idx+this->_DisplacedIndexOffset,v);
-    }
-    void asAbstractSimpleVectorRange(AbstractSimpleVector_sp& sv, size_t& start, size_t& end) const final {
-      unlikely_if (!gc::IsA<SimpleBitVector_sp>(this->_Data)) {
-        this->_Data->asAbstractSimpleVectorRange(sv,start,end);
-        start += this->_DisplacedIndexOffset;
-        end = this->length()+this->_DisplacedIndexOffset;
-        return;
-      }
-      sv = gc::As<SimpleBitVector_sp>(this->_Data);
-      start = this->_DisplacedIndexOffset;
-      end = this->length()+this->_DisplacedIndexOffset;
-    }
-    Array_sp create_result_bitarray (SimpleBitVector_sp data) {
-      return  BitVectorNs_O::make (this->arrayDimension(0),0,false, clasp_make_fixnum(this->fillPointer()), data,this->displacedToP(),clasp_make_fixnum(this->_DisplacedIndexOffset));
-    }
-  public:
-    virtual clasp_elttype elttype() const { return clasp_aet_bit; };
-    virtual bool equal(T_sp other) const final;
-    virtual bool equalp(T_sp other) const final { return this->equal(other);};
-    virtual void internalAdjustSize_(size_t size, T_sp init_element=_Nil<T_O>(), bool initElementSupplied=false ) override;
-    virtual Array_sp reverse() const override;
-    virtual Array_sp nreverse() override;
-  public:
-    CL_METHOD_OVERLOAD virtual void rowMajorAset(size_t idx, T_sp value) override {this->setBit(idx,value.unsafe_fixnum());};
-    CL_METHOD_OVERLOAD virtual T_sp rowMajorAref(size_t idx) const override {return clasp_make_fixnum(this->testBit(idx)); };
-    virtual void sxhash_(HashGenerator& hg) const final {
-      if (hg.isFilling()) {
-        AbstractSimpleVector_sp svec;
-        size_t start,end;
-        this->asAbstractSimpleVectorRange(svec,start,end);
-        svec->ranged_sxhash(hg,start,end);
-      }
-    }
-    virtual Fixnum_sp vectorPushExtend(T_sp newElement, size_t extension = 0) override;
-  };
-};
-
 
 namespace core {
   size_t calculateArrayTotalSizeAndValidateDimensions(List_sp dim_desig, size_t& rank);
@@ -1631,138 +1448,6 @@ public:
 };
 };
 
-
-// ----------------------------------------------------------------------
-//
-// Multidimensional bit arrays
-//
-//
-namespace core {
-  FORWARD(MDArrayBit);
-};
-namespace core {
-  class MDArrayBit_O : public MDArray_O {
-    LISP_CLASS(core, CorePkg, MDArrayBit_O, "MDArrayBit",MDArray_O);
-    virtual ~MDArrayBit_O() {};
-  public:
-    typedef SimpleBitVector_O simple_type;
-    typedef typename simple_type::bit_element_type bit_element_type;
-  public: // make array
-  MDArrayBit_O(size_t rank,
-                  List_sp dimensions,
-                  Array_sp data,
-                  bool displacedToP,
-                  Fixnum_sp displacedIndexOffset) : Base(rank,dimensions,data,displacedToP,displacedIndexOffset) {};
-    static MDArrayBit_sp make_multi_dimensional(List_sp dim_desig, bit_element_type initialElement, T_sp dataOrDisplacedTo, bool displacedToP, Fixnum_sp displacedIndexOffset) {
-      ASSERT(dim_desig.consp()||dim_desig.nilp());
-      size_t rank;
-      size_t arrayTotalSize = calculateArrayTotalSizeAndValidateDimensions(dim_desig,rank);
-      LIKELY_if (dataOrDisplacedTo.nilp()) {
-        dataOrDisplacedTo = simple_type::make(arrayTotalSize,initialElement,true);
-      }
-      MDArrayBit_sp array = gctools::GC<MDArrayBit_O>::allocate_container(false,rank,dim_desig,gc::As<Array_sp>(dataOrDisplacedTo),displacedToP,displacedIndexOffset);
-      return array;
-    }
-  public:
-    uint testBit(size_t idx) const {
-      AbstractSimpleVector_sp bme;
-      size_t mstart, mend;
-      this->asAbstractSimpleVectorRange(bme,mstart,mend);
-      simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-      return me->testBit(idx+this->_DisplacedIndexOffset);
-    }
-    void setBit(size_t idx, uint v)  {
-      AbstractSimpleVector_sp bme;
-      size_t mstart, mend;
-      this->asAbstractSimpleVectorRange(bme,mstart,mend);
-      simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-      me->setBit(idx+this->_DisplacedIndexOffset,v);
-    }
-    void asAbstractSimpleVectorRange(AbstractSimpleVector_sp& sv, size_t& start, size_t& end) const final {
-      unlikely_if (!gc::IsA<SimpleBitVector_sp>(this->_Data)) {
-        this->_Data->asAbstractSimpleVectorRange(sv,start,end);
-        start += this->_DisplacedIndexOffset;
-        //this->length() is a no-op here, returns the dummy value
-        end = this->_Data->length()+this->_DisplacedIndexOffset;
-        return;
-      }
-      sv = gc::As<SimpleBitVector_sp>(this->_Data);
-      start = this->_DisplacedIndexOffset;
-      //this->length() is a no-op here, returns the dummy value
-      end = sv->length()+this->_DisplacedIndexOffset;
-    }
-    CL_METHOD_OVERLOAD virtual void rowMajorAset(size_t idx, T_sp value) override {this->setBit(idx,value.unsafe_fixnum());};
-    CL_METHOD_OVERLOAD virtual T_sp rowMajorAref(size_t idx) const override {return clasp_make_fixnum(this->testBit(idx)); };
-    virtual bool equal(T_sp other) const final {return this->eq(other); };
-//    virtual bool equalp(T_sp other) const final;
-    virtual Array_sp reverse() const final {notVectorError(this->asSmartPtr());};
-    virtual Array_sp nreverse() override {notVectorError(this->asSmartPtr());};
-    virtual void internalAdjustSize_(size_t size, T_sp init_element=_Nil<T_O>(), bool initElementSupplied=false ) {HARD_IMPLEMENT_ME();};
-
-    Array_sp create_result_bitarray (SimpleBitVector_sp data) {
-      return  MDArrayBit_O::make_multi_dimensional (cl__arrayDimensions(this->asSmartPtr()),_Nil<T_O>(),data,false,clasp_make_fixnum(0));
-    }
-  };
-};
-
-namespace core {
-  class SimpleMDArrayBit_O : public SimpleMDArray_O {
-    LISP_CLASS(core, CorePkg, SimpleMDArrayBit_O, "SimpleMDArrayBit",SimpleMDArray_O);
-    virtual ~SimpleMDArrayBit_O() {};
-  public:
-    typedef SimpleBitVector_O simple_type;
-    typedef typename simple_type::bit_element_type bit_element_type;
-  public: // make array
-  SimpleMDArrayBit_O(size_t rank,
-                     List_sp dimensions,
-                     Array_sp data) : Base(rank,dimensions,data) {};
-    static SimpleMDArrayBit_sp make_multi_dimensional(List_sp dim_desig, bit_element_type initialElement, T_sp data) {
-      ASSERT(dim_desig.consp()||dim_desig.nilp());
-      size_t rank;
-      size_t arrayTotalSize = calculateArrayTotalSizeAndValidateDimensions(dim_desig,rank);
-      LIKELY_if (data.nilp()) {
-        data = SimpleBitVector_O::make(arrayTotalSize,initialElement,true);
-      }
-      SimpleMDArrayBit_sp array = gctools::GC<SimpleMDArrayBit_O>::allocate_container(false,rank,dim_desig,gc::As<Array_sp>(data));
-      return array;
-    }
-  public:
-    uint testBit(size_t idx) const {
-      AbstractSimpleVector_sp bme;
-      size_t mstart, mend;
-      this->asAbstractSimpleVectorRange(bme,mstart,mend);
-      simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-      return me->testBit(idx+this->_DisplacedIndexOffset);
-    }
-    void setBit(size_t idx, uint v)  {
-      AbstractSimpleVector_sp bme;
-      size_t mstart, mend;
-      this->asAbstractSimpleVectorRange(bme,mstart,mend);
-      simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-      me->setBit(idx+this->_DisplacedIndexOffset,v);
-    }
-    void asAbstractSimpleVectorRange(AbstractSimpleVector_sp& sv, size_t& start, size_t& end) const final {
-      sv = gc::As<SimpleBitVector_sp>(this->_Data);
-      start = this->_DisplacedIndexOffset;
-      // this->length() is the dummy value in this case, 0xDEADBEEF01234567
-      // this->length() in this class shoud return an error
-      // end = this->length()+this->_DisplacedIndexOffset;
-      end = sv->length()+this->_DisplacedIndexOffset;
-    }
-    CL_METHOD_OVERLOAD virtual void rowMajorAset(size_t idx, T_sp value) override {this->setBit(idx,value.unsafe_fixnum());};
-    CL_METHOD_OVERLOAD virtual T_sp rowMajorAref(size_t idx) const override {return clasp_make_fixnum(this->testBit(idx)); };
-    virtual bool equal(T_sp other) const final {return this->eq(other); };
-//    virtual bool equalp(T_sp other) const final;
-    virtual Array_sp reverse() const final {notVectorError(this->asSmartPtr());};
-    virtual Array_sp nreverse() override {notVectorError(this->asSmartPtr());};
-    virtual void internalAdjustSize_(size_t size, T_sp init_element=_Nil<T_O>(), bool initElementSupplied=false ) {HARD_IMPLEMENT_ME();};
-    Array_sp create_result_bitarray (SimpleBitVector_sp data) {
-      return SimpleMDArrayBit_O::make_multi_dimensional(cl__arrayDimensions(this->asSmartPtr()),1,data);
-    }  
-
-  };
-};
-
 // ----------------------------------------------------------------------
 //
 // Multidimensional base-char arrays
@@ -1897,7 +1582,7 @@ namespace core {
 #include <clasp/core/array_int32.h>
 #include <clasp/core/array_int16.h>
 #include <clasp/core/array_int8.h>
-
+#include <clasp/core/array_bit.h>
 
 // ----------------------------------------------------------------------
 //
@@ -1947,21 +1632,11 @@ namespace core {
   T_sp core__search_string(String_sp sub, size_t sub_start, T_sp sub_end, String_sp outer, size_t outer_start, T_sp outer_end );
   bool core__fits_in_base_string(T_sp str);
   T_sp core__copy_to_simple_base_string(T_sp buffer);
-  clasp_elttype clasp_array_elttype(T_sp array);
 
 CL_LAMBDA(dest destStart orig origStart len);
 CL_DECLARE();
 CL_DOCSTRING("copy_subarray");
- CL_DEFUN void core__copy_subarray(Array_sp dest, Fixnum_sp destStart, Array_sp orig, Fixnum_sp origStart, Fixnum_sp len);
-
-  void SimpleBitVector_inPlaceOr(SimpleBitVector_sp x, SimpleBitVector_sp y);
-  void SimpleBitVector_inPlaceAnd(SimpleBitVector_sp x, SimpleBitVector_sp y);
-  void SimpleBitVector_inPlaceXor(SimpleBitVector_sp x, SimpleBitVector_sp y);
-  void SimpleBitVector_getOnIndices(SimpleBitVector_sp x, vector<size_t> &res);
-  size_t SimpleBitVector_lowestIndex(SimpleBitVector_sp x);
-  bool SimpleBitVector_isZero(SimpleBitVector_sp x);
-  SimpleBitVector_sp SimpleBitVector_copy(SimpleBitVector_sp orig_sbv);
-  
+ CL_DEFUN void core__copy_subarray(Array_sp dest, Fixnum_sp destStart, Array_sp orig, Fixnum_sp origStart, Fixnum_sp len);  
 };
 
 

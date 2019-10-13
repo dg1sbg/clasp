@@ -39,27 +39,14 @@ THE SOFTWARE.
 #include <clasp/core/evaluator.h>
 #include <clasp/core/hashTableEq.h>
 #include <clasp/core/wrappers.h>
+
 namespace core {
 
-
 SYMBOL_EXPORT_SC_(KeywordPkg, calledFunction);
-SYMBOL_EXPORT_SC_(KeywordPkg, givenNumberOfArguments);
-SYMBOL_EXPORT_SC_(KeywordPkg, requiredNumberOfArguments);
+SYMBOL_EXPORT_SC_(KeywordPkg, givenNargs);
+SYMBOL_EXPORT_SC_(KeywordPkg, minNargs);
+SYMBOL_EXPORT_SC_(KeywordPkg, maxNargs);
 SYMBOL_EXPORT_SC_(KeywordPkg, unrecognizedKeyword);
-
-void handleArgumentHandlingExceptions(Closure_sp closure) {
-  Function_sp func = closure;
-  try {
-    throw;
-  } catch (TooManyArgumentsError &error) {
-    lisp_error(core::_sym_tooManyArgumentsError, lisp_createList(kw::_sym_calledFunction, func, kw::_sym_givenNumberOfArguments, make_fixnum(error.givenNumberOfArguments), kw::_sym_requiredNumberOfArguments, make_fixnum(error.requiredNumberOfArguments)));
-  } catch (TooFewArgumentsError &error) {
-    lisp_error(core::_sym_tooFewArgumentsError, lisp_createList(kw::_sym_calledFunction, func, kw::_sym_givenNumberOfArguments, make_fixnum(error.givenNumberOfArguments), kw::_sym_requiredNumberOfArguments, make_fixnum(error.requiredNumberOfArguments)));
-  } catch (UnrecognizedKeywordArgumentError &error) {
-    lisp_error(core::_sym_unrecognizedKeywordArgumentError, lisp_createList(kw::_sym_calledFunction, func, kw::_sym_unrecognizedKeyword, error.argument));
-  }
-}
-
 
 /*! Return true if the form represents a type
 */
@@ -215,12 +202,8 @@ void lambdaListHandler_createBindings(Closure_sp closure, core::LambdaListHandle
       return;
     }
   }
-  try {
-    LOG(BF("About to createBindingsInScopeVaList with\n llh->%s\n    VaList->%s") % _rep_(llh) % _rep_(lcc_vargs));
-    llh->createBindingsInScopeVaList(lcc_nargs, lcc_vargs, scope);
-  } catch (...) {
-    handleArgumentHandlingExceptions(closure);
-  }
+  LOG(BF("About to createBindingsInScopeVaList with\n llh->%s\n    VaList->%s") % _rep_(llh) % _rep_(lcc_vargs));
+  llh->createBindingsInScopeVaList(closure,lcc_nargs, lcc_vargs, scope);
   return;
 }
 
@@ -477,7 +460,7 @@ List_sp LambdaListHandler_O::process_macro_lambda_list(List_sp lambda_list) {
 
   Symbol_sp name_symbol = cl__gensym(SimpleBaseString_O::make("macro-name"));
   //	SourceCodeList_sp new_name_ll = SourceCodeCons_O::createWithDuplicateSourceCodeInfo(name_symbol,new_lambda_list,lambda_list,_lisp);
-  ql::list sclist; // (af_lineNumber(lambda_list),af_column(lambda_list),core__source_file_info(lambda_list));
+  ql::list sclist; // (af_lineNumber(lambda_list),af_column(lambda_list),core__file_scope(lambda_list));
   sclist << whole_symbol << environment_symbol << Cons_O::create(name_symbol, new_lambda_list);
   List_sp macro_ll = sclist.cons();
   return macro_ll;
@@ -588,8 +571,6 @@ void LambdaListHandler_O::recursively_build_handlers_count_arguments(List_sp dec
   }
 }
 
-SYMBOL_SC_(CorePkg, tooFewArguments);
-
 #define PASS_FUNCTION_REQUIRED bind_required_va_list
 #define PASS_FUNCTION_OPTIONAL bind_optional_va_list
 #define PASS_FUNCTION_REST bind_rest_va_list
@@ -606,7 +587,7 @@ SYMBOL_SC_(CorePkg, tooFewArguments);
 #undef PASS_ARGS_NUM
 #undef PASS_NEXT_ARG
 
-void bind_aux(gctools::Vec0<AuxArgument> const &auxs, DynamicScopeManager &scope) {
+void bind_aux(T_sp closure, gctools::Vec0<AuxArgument> const &auxs, DynamicScopeManager &scope) {
   LOG(BF("There are %d aux variables") % auxs.size());
   gctools::Vec0<AuxArgument>::iterator ci;
   {
@@ -623,32 +604,32 @@ void bind_aux(gctools::Vec0<AuxArgument> const &auxs, DynamicScopeManager &scope
   }
 }
 
-void LambdaListHandler_O::createBindingsInScopeVaList(size_t nargs, VaList_sp va,
+void LambdaListHandler_O::createBindingsInScopeVaList(core::T_sp closure,
+                                                      size_t nargs, VaList_sp va,
                                                       DynamicScopeManager &scope) {
   if (UNLIKELY(!this->_CreatesBindings))
     return;
   Vaslist arglist_struct(*va);
   VaList_sp arglist(&arglist_struct);
   int arg_idx = 0;
-  arg_idx = bind_required_va_list(this->_RequiredArguments, nargs, arglist, arg_idx, scope);
+  arg_idx = bind_required_va_list(closure,this->_RequiredArguments, nargs, arglist, arg_idx, scope);
   if (UNLIKELY(this->_OptionalArguments.size() != 0)) {
-    arg_idx = bind_optional_va_list(this->_OptionalArguments, nargs, arglist, arg_idx, scope);
+    arg_idx = bind_optional_va_list(closure,this->_OptionalArguments, nargs, arglist, arg_idx, scope);
   }
   if (UNLIKELY(arg_idx < nargs && !(this->_RestArgument.isDefined()) && (this->_KeywordArguments.size() == 0))) {
-    throwTooManyArgumentsError(nargs, this->numberOfLexicalVariables());
-    //	    TOO_MANY_ARGUMENTS_ERROR();
+    throwTooManyArgumentsError(closure,nargs, this->numberOfLexicalVariables());
   }
   if (UNLIKELY(this->_RestArgument.isDefined())) {
     // Make and use a copy of the arglist so that keyword processing can parse the args as well
     Vaslist copy_arglist(*arglist);
     VaList_sp copy_arglist_sp(&copy_arglist);
-    bind_rest_va_list(this->_RestArgument, nargs, copy_arglist_sp, arg_idx, scope);
+    bind_rest_va_list(closure,this->_RestArgument, nargs, copy_arglist_sp, arg_idx, scope);
   }
   if (UNLIKELY(this->_KeywordArguments.size() != 0)) {
-    bind_keyword_va_list(this->_KeywordArguments, this->_AllowOtherKeys, nargs, arglist, arg_idx, scope);
+    bind_keyword_va_list(closure,this->_KeywordArguments, this->_AllowOtherKeys, nargs, arglist, arg_idx, scope);
   }
   if (UNLIKELY(this->_AuxArguments.size() != 0))
-    bind_aux(this->_AuxArguments, scope);
+    bind_aux(closure,this->_AuxArguments, scope);
 }
 
 void LambdaListHandler_O::dump_keywords()
@@ -1385,6 +1366,19 @@ CL_DEFMETHOD List_sp LambdaListHandler_O::namesOfLexicalVariables() const {
   for (auto cur : this->_ClassifiedSymbolList) {
     if (oCar(oCar(cur)) == ext::_sym_lexicalVar) {
       namesRev = Cons_O::create(oCadr(oCar(cur)), namesRev);
+    }
+  }
+  return cl__nreverse(namesRev);
+}
+
+
+CL_LISPIFY_NAME("special-variables");
+CL_DEFMETHOD List_sp LambdaListHandler_O::specialVariables() const {
+  List_sp namesRev = _Nil<T_O>();
+  for (auto cur : this->_ClassifiedSymbolList) {
+    T_sp entry = CONS_CAR(cur);
+    if (oCar(entry) == ext::_sym_specialVar) {
+      namesRev = Cons_O::create(oCdr(entry), namesRev);
     }
   }
   return cl__nreverse(namesRev);

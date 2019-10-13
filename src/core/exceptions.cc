@@ -66,40 +66,69 @@ void assert_failure(const char* file, size_t line, const char* func, const char*
   SIMPLE_ERROR(BF("%s:%d:%s  Assertion failure: %s") % file % line % func % msg);
 }
 
+void assert_failure_bounds_error_lt(const char* file, size_t line, const char* func, int64_t x, int64_t y)
+{
+  SIMPLE_ERROR(BF("%s:%d:%s  Assertion failure: bounds error - %s must be less than %s") % file % line % func % x % y);
+}
+
 /*! These are here just so that the clang compiler
       will assign the __attribute__((weak)) to the vtable of each of these classes
     */
 void CatchThrow::keyFunctionForVtable(){};
 void ReturnFrom::keyFunctionForVtable(){};
-void LexicalGo::keyFunctionForVtable(){};
 void DynamicGo::keyFunctionForVtable(){};
 void Unwind::keyFunctionForVtable(){};
 
-TooFewArgumentsError::TooFewArgumentsError(int given, int required) : givenNumberOfArguments(given), requiredNumberOfArguments(required) {
-  printf("%s:%d Constructed TooFewArgumentsError given %d required %d\n", __FILE__, __LINE__, given, required);
-};
-TooManyArgumentsError::TooManyArgumentsError(int given, int required) : givenNumberOfArguments(given), requiredNumberOfArguments(required){};
-
-void throwTooFewArgumentsError(size_t given, size_t required) {
-  SIMPLE_ERROR(BF("Too few arguments given %d required %d") % given % required);
-  //        throw(TooFewArgumentsError(given,required));
+CL_LAMBDA();
+CL_DECLARE();
+CL_DOCSTRING("Returns the list of active CL:CATCH tags. Strictly for debugging.");
+CL_DEFUN List_sp core__active_catch_tags() {
+  return my_thread->catchTags();
 }
 
-void throwTooManyArgumentsError(size_t given, size_t required) {
-  SIMPLE_ERROR(BF("Too many arguments error given: %d required: %d") % given % required);
-  //        throw(TooManyArgumentsError(given,required));
+// The control transfer part of CL:THROW
+[[noreturn]] void clasp_throw(T_sp tag) {
+  // Check the list of catches in place to make sure the tag is there.
+  bool found = false;
+  for (auto tag_cons : my_thread->catchTags()) {
+    if (tag == oCar(tag_cons)) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) CONTROL_ERROR();
+#ifdef DEBUG_TRACK_UNWINDS
+  global_CatchThrow_count++;
+#endif
+  throw CatchThrow(tag);
 }
 
-void throwUnrecognizedKeywordArgumentError(T_sp kw) {
-  SIMPLE_ERROR(BF("Unrecognized keyword argument error: %s") % _rep_(kw));
-  //        throw(UnrecognizedKeywordArgumentError(kw));
+SYMBOL_EXPORT_SC_(KeywordPkg,called_function);
+void throwTooFewArgumentsError(core::T_sp closure, size_t given, size_t required) {
+  lisp_error(core::_sym_wrongNumberOfArguments,
+             lisp_createList(kw::_sym_called_function, closure,
+                             kw::_sym_givenNargs, make_fixnum(given),
+                             kw::_sym_minNargs, make_fixnum(required)));
 }
 
-void wrongNumberOfArguments(std::size_t givenNumberOfArguments, std::size_t requiredNumberOfArguments) {
+void throwTooManyArgumentsError(core::T_sp closure, size_t given, size_t required) {
+  lisp_error(core::_sym_wrongNumberOfArguments,
+             lisp_createList(kw::_sym_called_function, closure,
+                             kw::_sym_givenNargs, make_fixnum(given),
+                             kw::_sym_maxNargs, make_fixnum(required)));
+}
+
+void throwUnrecognizedKeywordArgumentError(core::T_sp closure, T_sp kw) {
+  lisp_error(core::_sym_unrecognizedKeywordArgumentError,
+             lisp_createList(kw::_sym_unrecognizedKeyword, kw,
+                             kw::_sym_called_function,closure));
+}
+
+void wrongNumberOfArguments(core::T_sp closure, size_t givenNumberOfArguments, size_t requiredNumberOfArguments) {
   if (givenNumberOfArguments < requiredNumberOfArguments)
-    throwTooFewArgumentsError(givenNumberOfArguments, requiredNumberOfArguments);
+    throwTooFewArgumentsError(closure,givenNumberOfArguments, requiredNumberOfArguments);
   else
-    throwTooManyArgumentsError(givenNumberOfArguments, requiredNumberOfArguments);
+    throwTooManyArgumentsError(closure,givenNumberOfArguments, requiredNumberOfArguments);
 }
 
 #define DebugOpenLeft "{{{ "
@@ -525,25 +554,6 @@ char *internalPrintf(const Lisp_sp &lisp, const char *fmt, va_list arg_ptr) {
   return outBuffer;
 }
 
-void _stackTraceEnter_WriteEntryToLog(int entryIndex) {
-  IMPLEMENT_ME();
-}
-
-void _stackTraceEnter(uint debugFlags) {
-  IMPLEMENT_ME();
-}
-
-void _stackTraceLineNumberAndColumnUpdate(uint ln, uint col) {
-}
-
-void _stackTraceExit() {
-  IMPLEMENT_ME();
-}
-
-void _stackTraceDump() {
-  IMPLEMENT_ME();
-}
-
 #define ARGS_af_wrongTypeKeyArg "(source-file lineno function narg value type)"
 #define DECL_af_wrongTypeKeyArg ""
 #define DOCS_af_wrongTypeKeyArg "wrongTypeKeyArg"
@@ -753,12 +763,6 @@ void core__reader_error_internal(const string &sourceFile, uint lineno,
                   kw::_sym_stream, stream);
   }
 };
-
-void assert_type_integer(int index, T_sp p) {
-  if (!gc::IsA<Integer_sp>(p)) {
-    QERROR_WRONG_TYPE_NTH_ARG(index, p, cl::_sym_Integer_O);
-  }
-}
 
 void FEerror(const string &fmt, int nargs, ...) {
   SimpleBaseString_sp sfmt = SimpleBaseString_O::make(fmt);

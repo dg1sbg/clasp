@@ -462,10 +462,6 @@
 (defmethod interpret-ast ((ast cc-ast:vaslist-pop-ast) env)
   (core:vaslist-pop (interpret-ast (cleavir-ast:arg-ast ast) env)))
 
-(defcan cc-ast:instance-stamp-ast)
-(defmethod interpret-ast ((ast cc-ast:instance-stamp-ast) env)
-  (core:instance-stamp (interpret-ast (cleavir-ast:arg-ast ast) env)))
-
 #-cst (defcan cc-ast:bind-va-list-ast)
 #-cst ; bind-va-list doesn't inline right - FIXME
 (defmethod interpret-ast ((ast cc-ast:bind-va-list-ast) env)
@@ -531,7 +527,7 @@
                                 #-cst 'cleavir-generate-ast:consider-global))))
        #-cst
        (cleavir-generate-ast:generate-ast
-        (cst:raw form) env clasp-cleavir:*clasp-system* dynenv)
+        (cst:raw cst) env clasp-cleavir:*clasp-system* dynenv)
        #+cst
        (cleavir-cst-to-ast:cst-to-ast
         cst env clasp-cleavir:*clasp-system* dynenv)))

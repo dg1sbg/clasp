@@ -285,8 +285,43 @@
   (:mdarray :axis))
 (define-functionlike-special-form core:vaslist-pop cc-ast:vaslist-pop-ast
   (:vaslist))
-(define-functionlike-special-form core:instance-stamp cc-ast:instance-stamp-ast
-  (:arg))
+(define-functionlike-special-form core:vaslist-length cc-ast:vaslist-length-ast
+  (:vaslist))
+
+(define-functionlike-special-form core::header-stamp cc-ast:header-stamp-ast (:arg))
+(define-functionlike-special-form core::rack-stamp cc-ast:rack-stamp-ast (:arg))
+(define-functionlike-special-form core::wrapped-stamp cc-ast:wrapped-stamp-ast (:arg))
+(define-functionlike-special-form core::derivable-stamp cc-ast:derivable-stamp-ast (:arg))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Converting CORE::HEADER-STAMP-CASE
+;;;
+
+(defmethod cleavir-generate-ast:convert-special
+    ((symbol (eql 'core::header-stamp-case)) form env (system clasp-cleavir:clasp))
+  (destructuring-bind (stamp derivable rack wrapped header) (rest form)
+    (clasp-cleavir-ast:make-header-stamp-case-ast
+     (cleavir-generate-ast:convert stamp env system)
+     (cleavir-generate-ast:convert derivable env system)
+     (cleavir-generate-ast:convert rack env system)
+     (cleavir-generate-ast:convert wrapped env system)
+     (cleavir-generate-ast:convert header env system))))
+
+(defmethod cleavir-generate-ast:check-special-form-syntax ((head (eql 'core::header-stamp-case)) form)
+  (cleavir-code-utilities:check-form-proper-list form)
+  (cleavir-code-utilities:check-argcount form 5 5))
+
+(defmethod cleavir-cst-to-ast:convert-special
+    ((symbol (eql 'core::header-stamp-case)) cst env (system clasp-cleavir:clasp))
+  (cst:db origin (stamp derivable rack wrapped header) (cst:rest cst)
+    (clasp-cleavir-ast:make-header-stamp-case-ast
+     (cleavir-cst-to-ast:convert stamp env system)
+     (cleavir-cst-to-ast:convert derivable env system)
+     (cleavir-cst-to-ast:convert rack env system)
+     (cleavir-cst-to-ast:convert wrapped env system)
+     (cleavir-cst-to-ast:convert header env system)
+     origin)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -305,6 +340,34 @@
   (def-cst-macro catch (tag . body) origin
     (reinitialize-instance (cst:cst-from-expression `(core:catch-function ,tag (lambda () (declare (core:lambda-name catch-lambda)) (progn ,@body)))) :source origin)))
 
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Converting core::local-tagbody to tagbody
+;;;        and core::local-block to block
+;;;
+
+(defmethod cleavir-generate-ast:convert-special
+    ((symbol (eql 'core::local-tagbody)) form environment (system clasp-cleavir:clasp))
+  (cleavir-generate-ast:convert-special 'tagbody form environment system))
+
+(defmethod cleavir-generate-ast:check-special-form-syntax ((head (eql 'core::local-tagbody)) form)
+  (cleavir-generate-ast:check-special-form-syntax 'tagbody form))
+
+(defmethod cleavir-generate-ast:convert-special
+    ((symbol (eql 'core::local-block)) form environment (system clasp-cleavir:clasp))
+  (cleavir-generate-ast:convert-special 'block form environment system))
+
+(defmethod cleavir-generate-ast:check-special-form-syntax ((head (eql 'core::local-block)) form)
+  (cleavir-generate-ast:check-special-form-syntax 'block form))
+
+(defmethod cleavir-cst-to-ast:convert-special
+    ((symbol (eql 'core::local-tagbody)) cst environment (system clasp-cleavir:clasp))
+  (cleavir-cst-to-ast:convert-special 'tagbody cst environment system))
+
+(defmethod cleavir-cst-to-ast:convert-special
+    ((symbol (eql 'core::local-block)) cst environment (system clasp-cleavir:clasp))
+  (cleavir-cst-to-ast:convert-special 'block cst environment system))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -332,8 +395,8 @@
     (cleavir-cst-to-ast::convert `(core:throw-function ,tag ,result-cst) environment system)
     ;; If I decide to go with a throw-ast node use the following
     (clasp-cleavir-ast:make-throw-ast
-     (cleavir-cst-to-ast::convert tag environment system)
-     (cleavir-cst-to-ast::convert result-cst environment system)
+     (cleavir-cst-to-ast:convert tag environment system)
+     (cleavir-cst-to-ast:convert result-cst environment system)
      origin)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -391,6 +454,7 @@
                (canonicalized-dspecs
                  (cst:canonicalize-declaration-specifiers
                   system
+                  (cleavir-env:declarations environment)
                   declaration-specifiers)))
           (multiple-value-bind (idspecs rdspecs)
               (cleavir-cst-to-ast::itemize-declaration-specifiers-by-parameter-group

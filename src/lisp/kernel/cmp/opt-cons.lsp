@@ -3,6 +3,13 @@
 
 (in-package #:cmp)
 
+(define-compiler-macro list (&whole form &rest elements)
+  (case (length elements)
+    (0 'nil)
+    ;; This is a little bit faster and doesn't really involve more code.
+    (1 `(cons ,(first elements) nil))
+    (t form)))
+
 (defconstant +nthcdr-inline-limit+ 8) ; totally arbitrary
 
 (define-compiler-macro nthcdr (&whole whole index list &environment env)
@@ -122,3 +129,31 @@
 (define-compiler-macro adjoin (&whole whole value list &rest sequence-args &environment env)
   (or (apply #'expand-adjoin env (rest whole))
       whole))
+
+;;;
+;;; APPEND
+;;;
+
+;;; backquote expands into this kind of thing sometimes.
+(define-compiler-macro append (&whole form &rest lists &environment env)
+  (flet ((constant-nil-p (form)
+           (and (constantp form env)
+                (null (ext:constant-form-value form env))))
+         (list-form-p (form)
+           (and (consp form)
+                (eq (first form) 'list)
+                (core:proper-list-p (rest form)))))
+    (cond ((null lists) 'nil)
+          ((null (cdr lists)) `,(first lists))
+          ((member-if #'constant-nil-p (butlast lists))
+          ;; Remove NILs
+          `(append ,@(remove-if #'constant-nil-p (butlast lists)) ,@(last lists)))
+          ((every #'list-form-p lists)
+           ;; if we have (append (list ...) (list ...)), simplify to (list ...)
+           `(list ,@(loop for (op . args) in lists
+                          appending args)))
+          (t form))))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (setf (compiler-macro-function 'core:backquote-append)
+        (compiler-macro-function 'append)))

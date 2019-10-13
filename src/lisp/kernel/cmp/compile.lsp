@@ -20,13 +20,6 @@
        (cmp-log "About to optimize-module%N")
        (when (and ,optimize ,optimize-level (null ,dry-run)) (funcall ,optimize ,module ,optimize-level )))))
 
-(defmacro with-source-pathnames ((&key source-pathname
-                                    source-debug-pathname
-                                    (source-debug-offset 0)) &rest body)
-  `(let* ((*source-debug-pathname* (or ,source-debug-pathname ,source-pathname))
-          (*source-debug-offset* ,source-debug-offset))
-     ,@body))
-
 (defun compile-with-hook (compile-hook definition env pathname &key (linkage 'llvm-sys:internal-linkage))
   "Dispatch to clasp compiler or cleavir-clasp compiler if available.
 We could do more fancy things here - like if cleavir-clasp fails, use the clasp compiler as backup."
@@ -38,16 +31,17 @@ We could do more fancy things here - like if cleavir-clasp fails, use the clasp 
 (defun compile-in-env (definition env &optional (compile-hook *cleavir-compile-hook*)
                                         (linkage 'llvm-sys:internal-linkage))
   "Compile in the given environment"
+  (when core:*debug-startup*
+    (core:monitor-write (core:bformat nil "startup compile-in-env form: %s%N" definition)))
   (with-compiler-env ()
     (let* ((module (create-run-time-module-for-compile)))
       ;; Link the C++ intrinsics into the module
       (with-module (:module module
                     :optimize nil)
-        (with-source-pathnames (:source-pathname *load-pathname*) ; may be NIL.
-          (cmp-log "Dumping module%N")
-          (cmp-log-dump-module module)
-          (let ((pathname (if *load-pathname* (namestring *load-pathname*) "repl-code")))
-            (compile-with-hook compile-hook definition env pathname :linkage linkage)))))))
+        (cmp-log "Dumping module%N")
+        (cmp-log-dump-module module)
+        (let ((pathname (if *load-pathname* (namestring *load-pathname*) "repl-code")))
+          (compile-with-hook compile-hook definition env pathname :linkage linkage))))))
 
 (defun compile (name &optional definition)
   (multiple-value-bind (function warnp failp)

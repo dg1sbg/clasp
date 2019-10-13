@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include <clasp/core/bformat.h>
 #include <clasp/core/symbolTable.h>
 #include <clasp/core/evaluator.h>
+#include <clasp/core/compiler.h>
 #include <clasp/core/numbers.h>
 #include <clasp/core/hashTable.h>
 #include <clasp/core/primitives.h>
@@ -84,9 +85,6 @@ void SimpleBaseString_set(SimpleBaseString_sp array, Fixnum_sp idx, Character_sp
 };
 
 namespace core {
-void bitVectorDoesntSupportError() {
-  SIMPLE_ERROR(BF("You tried to invoke a method that bit-vector doesn't support on a bit-vector"));
-}
 void missingValueListError(List_sp indices) {
   SIMPLE_ERROR(BF("The value was missing after the indices %s") % _rep_(indices));
 }
@@ -96,8 +94,15 @@ void tooManyIndicesListError(List_sp indices) {
 void badAxisNumberError(Symbol_sp fn_name, size_t rank, size_t axisNumber) {
   SIMPLE_ERROR(BF("In %s illegal axis number %d must be less than rank %d") % _rep_(fn_name) % axisNumber % rank );
 }
-void badIndexError(size_t oneIndex, size_t curDimension) {
-  SIMPLE_ERROR(BF("The index %d must be less than %d") % oneIndex % curDimension );
+void badIndexError(T_sp array, size_t axis, gc::Fixnum index, size_t dimension) {
+  ERROR(core::_sym_array_out_of_bounds,
+        core::lisp_createList(kw::_sym_expected_type,
+                              // `(integer 0 (,dimension))
+                              core::lisp_createList(cl::_sym_integer, clasp_make_fixnum(0),
+                                                    core::lisp_createList(clasp_make_fixnum(dimension))),
+                              kw::_sym_datum, clasp_make_fixnum(index),
+                              kw::_sym_object, array,
+                              kw::_sym_axis, clasp_make_fixnum(axis)));
 }
 void indexNotFixnumError(T_sp index) {
   TYPE_ERROR(index,cl::_sym_fixnum);
@@ -113,9 +118,6 @@ void cannotAdjustSizeOfSimpleArrays(T_sp obj) {
 }
 void notSequenceError(T_sp obj) {
   TYPE_ERROR(obj,cl::_sym_string);
-}
-void vectorNotArrayError(Symbol_sp fn_name, T_sp array) {
-  SIMPLE_ERROR(BF("In %s - vector is not an array") % _rep_(fn_name));
 }
 void notAdjustableError(Symbol_sp fn_name, T_sp array) {
   SIMPLE_ERROR(BF("In %s - array is not adjustable") % _rep_(fn_name));
@@ -144,39 +146,6 @@ void noFillPointerSpecializedArrayError(T_sp thing) {
 
 
 namespace core {
-
-// -----------------------------------------------------------
-//
-// Utility functions
-//
-
-bool ranged_bit_vector_EQ_(const SimpleBitVector_O& bvx,const SimpleBitVector_O& bvy, size_t startx, size_t endx, size_t starty, size_t endy) {
-  size_t lenx = endx - startx;
-  size_t leny = endy - starty;
-  if (lenx!=leny) return false;
-  for (size_t ix(startx), iy(starty); ix<endx; ++ix, ++iy ) {
-    if (bvx.testBit(ix) != bvy.testBit(iy)) return false;
-  }
-  return true;
-}
-
-Array_sp ranged_bit_vector_reverse(SimpleBitVector_sp sv, size_t start, size_t end) {
-  gctools::smart_ptr<SimpleBitVector_O> rev = SimpleBitVector_O::make(end-start);
-  for (size_t i(0),iEnd(end-start); i<iEnd; ++i ) {
-    rev->setBit(i,sv->testBit(end-1-i));
-  }
-  return rev;
-}
-
-void ranged_bit_vector_nreverse(SimpleBitVector_sp sv, size_t start, size_t end) {
-  size_t middle = (end-start)/2;
-  for (size_t i(start),iEnd(start+end-1),iOff(0); i<middle; ++i,--iEnd ) {
-    uint x = sv->testBit(i);
-    uint y = sv->testBit(iEnd);
-    sv->setBit(iEnd,x);
-    sv->setBit(i,y);
-  }
-}
 
 // ------------------------------------------------------------
 //
@@ -247,9 +216,9 @@ size_t Array_O::arrayRowMajorIndex(List_sp indices) const {
     LIKELY_if (cur.consp()) {
       T_sp index = oCar(cur);
       LIKELY_if (index.fixnump()) {
-        size_t oneIndex = index.unsafe_fixnum();
+        gc::Fixnum oneIndex = index.unsafe_fixnum();
         unlikely_if (oneIndex < 0 || oneIndex >= curDimension) {
-          badIndexError(oneIndex, curDimension);
+          badIndexError(this->asSmartPtr(), idx, oneIndex, curDimension);
         }
         offset = offset * curDimension + oneIndex;
       } else {
@@ -286,9 +255,9 @@ size_t Array_O::arrayRowMajorIndex(VaList_sp indices) const {
     core::T_sp one = indices->next_arg();
     size_t curDimension = this->arrayDimension(idx);
     LIKELY_if (one.fixnump()) {
-      size_t oneIndex = one.unsafe_fixnum();
+      gc::Fixnum oneIndex = one.unsafe_fixnum();
       unlikely_if (oneIndex < 0 || oneIndex >= curDimension) {
-        badIndexError(oneIndex, curDimension);
+        badIndexError(this->asSmartPtr(), idx, oneIndex, curDimension);
       }
       offset = offset * curDimension + oneIndex;
     } else {
@@ -318,10 +287,30 @@ CL_DEFUN bool cl__adjustable_array_p(Array_sp array)
 CL_LISPIFY_NAME("cl:array-dimension");
 CL_DEFUN size_t cl__arrayDimension(Array_sp array, size_t idx)
 {
-  if (idx >= array->rank()) {
-    SIMPLE_ERROR(BF("array-dimension index %d is out of bounds - must be less than %d") % idx % array->rank());
-  }
   return array->arrayDimension(idx);
+}
+
+CL_LISPIFY_NAME("core:data-vector-p");
+CL_DEFUN bool core__data_vector_p(T_sp obj)
+{
+  return gc::IsA<AbstractSimpleVector_sp>(obj);
+}
+
+CL_LISPIFY_NAME("core:check-rank");
+CL_DEFUN T_mv core__check_rank(Array_sp array, size_t vs_rank) {
+  size_t rank = array->rank();
+  if (rank != vs_rank)
+    SIMPLE_ERROR(BF("Wrong number of subscripts, %d, for an array of rank %d.")
+                 % vs_rank % rank);
+  return Values0<T_O>();
+}
+
+CL_LISPIFY_NAME("core:check-index");
+CL_DEFUN T_mv core__check_index (size_t index, size_t max, size_t axis) {
+  if (!((index >= 0) && (index < max)))
+    SIMPLE_ERROR(BF("Invalid index %d for axis %d of array: expected 0-%d")
+                 % index % axis % max);
+  return Values0<T_O>();
 }
 
 // ------------------------------------------------------------
@@ -510,6 +499,19 @@ CL_DEFUN  T_sp cl__rowMajorAref(Array_sp array, size_t idx)
   return array->rowMajorAref(idx);
 }
 
+CL_LISPIFY_NAME("core:vref");
+CL_DEFUN T_sp core__vref(AbstractSimpleVector_sp vec, size_t idx)
+{
+  return vec->vref(idx);
+}
+
+CL_LISPIFY_NAME("CORE:vref");
+CL_DEFUN_SETF T_sp core__vset(T_sp value, AbstractSimpleVector_sp vec, size_t idx)
+{
+  vec->vset(idx, value);
+  return value;
+}
+
 CL_DEFUN size_t core__arrayFlags(Array_sp a)
 {
   if (gc::IsA<AbstractSimpleVector_sp>(a)) {
@@ -568,7 +570,6 @@ CL_DEFUN  size_t cl__array_rank(Array_sp array)
   return array->rank();
 }
 
-
 CL_LAMBDA(core::array);
 CL_DECLARE();
 CL_DOCSTRING("arrayDisplacement");
@@ -578,6 +579,16 @@ CL_DEFUN T_mv cl__array_displacement(Array_sp array) {
   }
   MDArray_O* mdarray = reinterpret_cast<MDArray_O*>(&*array);
   return Values(mdarray->displacedTo(),clasp_make_fixnum(mdarray->displacedIndexOffset()));
+}
+
+// Next two used internally. In the compiler they'll be inlined.
+CL_LISPIFY_NAME("core:%displacement");
+CL_DEFUN T_sp core__PERCENTdisplacement(MDArray_sp array) {
+  return array->realDisplacedTo();
+}
+CL_LISPIFY_NAME("core:%displaced-index-offset");
+CL_DEFUN T_sp core__PERCENTdisplaced_index_offset(MDArray_sp array) {
+  return clasp_make_fixnum(array->displacedIndexOffset());
 }
 
 void core__copy_subarray(Array_sp dest, Fixnum_sp destStart, Array_sp orig, Fixnum_sp origStart, Fixnum_sp len) {
@@ -2007,176 +2018,6 @@ std::string SimpleCharacterString_O::__repr__() const {
   return this->get_std_string();
 }
 
-// ----------------------------------------------------------------------
-//
-// Class SimpleBitVector
-//
-
-SimpleBitVector_sp SimpleBitVector_O::make(const string& bv) {
-  size_t dim = bv.size()-2;
-  SimpleBitVector_sp x = SimpleBitVector_O::make(dim);
-  for (int i = 0; i<dim; i++) {
-    char elt = bv[i+2];
-    x->setBit(i,elt-'0');
-  }
-  return x;
-}
-
-// Restored by drmeister because Cando uses this function
-//  we can remove it if there is a problem with it or it is redundant.
-SimpleBitVector_sp SimpleBitVector_copy(SimpleBitVector_sp orig_sbv)
-{
-  size_t value_type_size = core::SimpleBitVector_O::bitunit_array_type::sizeof_for_length(orig_sbv->length())/sizeof(core::SimpleBitVector_O::value_type);
-//  printf("%s:%d Copy SimpleBitVector length = %" PRu "   value_type_size = %lu\n", __FILE__, __LINE__, orig_sbv->length(), value_type_size );
-//  fflush(stdout);
-  core::SimpleBitVector_sp sbv = core::SimpleBitVector_O::make(orig_sbv->length(),0,true,value_type_size,&orig_sbv->_Data[0]);
-  return sbv;
-}
-
-Array_sp SimpleBitVector_O::unsafe_subseq(size_t start, size_t end) const {
-  BOUNDS_ASSERT(0<=start&&start<end&&end<=this->length());
-  SimpleBitVector_sp sbv = SimpleBitVector_O::make(end-start);
-  for (size_t i(0),iEnd(end-start);i<iEnd;++i) {
-    sbv->setBit(i,this->testBit(start+i));
-  }
-  return sbv;
-}
-
-Array_sp SimpleBitVector_O::unsafe_setf_subseq(size_t start, size_t end, Array_sp other) {
-  BOUNDS_ASSERT(0<=start&&start<end&&end<=this->length());
-  if (SimpleBitVector_sp sbv = other.asOrNull<SimpleBitVector_O>()) {
-      // TODO: Write specialized versions of this to speed it up
-    for ( size_t i(start),ni(0); i<end; ++i,++ni ) {
-      this->setBit(i,sbv->testBit(ni));
-    }
-    return this->asSmartPtr();
-  } else if (BitVectorNs_sp bv = other.asOrNull<BitVectorNs_O>()) {
-    AbstractSimpleVector_sp bsv;
-    size_t ostart, oend;
-    bv->asAbstractSimpleVectorRange(bsv,ostart,oend);
-    SimpleBitVector_sp sbv = gc::As_unsafe<SimpleBitVector_sp>(bsv);
-    for ( size_t i(start),io(ostart); i<end; ++i, ++io) {
-      this->setBit(i,sbv->testBit(io));
-    }
-    return this->asSmartPtr();
-  }
-  TYPE_ERROR(other,cl::_sym_bit_vector);
-}
-
-// This does not work properly
-/*
-void SimpleBitVector_O::unsafe_fillArrayWithElt(T_sp initialElement, size_t start, size_t end)
-{
-  value_type initBlockValue = (initialElement.nilp()) ? 0 : ~0;
-  // round up start and round down end
-  size_t blockStart = ((start+BitWidth-1)/BitWidth);
-  size_t blockEnd = (end+BitWidth-1)/BitWidth;
-  for (size_t i(start), iEnd(blockStart*BitWidth); i<iEnd; ++i ) {
-    this->setBit(i,initBlockValue);
-  }
-  for (size_t i(blockStart),iEnd(blockEnd); i<iEnd; ++i ) {
-    this->_Data[i] = initBlockValue;
-  }
-  for (size_t i(blockEnd*BitWidth), iEnd(end); i<iEnd; ++i ) {
-    this->setBit(i,initBlockValue);
-  }
-};
-*/
-
-void SimpleBitVector_O::unsafe_fillArrayWithElt(T_sp initialElement, size_t start, size_t end) {
-  if (CLASP_FIXNUMP (initialElement))
-  {
-    Fixnum zero_or_one = gc::As<core::Fixnum_sp>(initialElement).unsafe_fixnum();
-    if ((zero_or_one == 0) || (zero_or_one == 1)) {
-      for (size_t i(start),iEnd(end); i<iEnd; ++i) {
-        this->setBit(i, zero_or_one);
-      }
-    }
-    else TYPE_ERROR(initialElement, cl::_sym_bit);
-  }
-  else TYPE_ERROR(initialElement, cl::_sym_bit);
-}
-
-
-bool SimpleBitVector_O::equal(T_sp other) const {
-  if (this == &*other) return true;
-  if (SimpleBitVector_sp sbv = other.asOrNull<SimpleBitVector_O>()) {
-    if (this->length()!=sbv->length()) return false;
-    return ranged_bit_vector_EQ_(*this,*sbv,0,this->length(),0,sbv->length());
-  } else if (BitVectorNs_sp bvns = other.asOrNull<BitVectorNs_O>()) {
-    if (this->length()!=bvns->length()) return false;
-    AbstractSimpleVector_sp sv;
-    size_t start, end;
-    bvns->asAbstractSimpleVectorRange(sv,start,end);
-    SimpleBitVector_O& sbv = *gc::As<SimpleBitVector_sp>(sv);
-    return ranged_bit_vector_EQ_(*this,sbv,0,this->length(),start,end);
-  }
-  return false;
-}
-
-Array_sp SimpleBitVector_O::reverse() const {
-  return ranged_bit_vector_reverse(this->asSmartPtr(),0,this->length());
-}
-
-Array_sp SimpleBitVector_O::nreverse() {
-  ranged_bit_vector_nreverse(this->asSmartPtr(),0,this->length());
-  return this->asSmartPtr();
-}
-
-void SimpleBitVector_inPlaceOr(SimpleBitVector_sp x, SimpleBitVector_sp y) {
-  size_t i;
-  if (x->length() != y->length()) SIMPLE_ERROR(BF("BitVectors aren't the same length for in place or - lengths are %d and %d") % x->length() % y->length());
-  for (size_t i = 0; i<x->_Data.number_of_words(); ++i ) {
-    (*x)._Data[i] |= (*y)._Data[i];
-  }
-}
-
-void SimpleBitVector_inPlaceAnd(SimpleBitVector_sp x, SimpleBitVector_sp y) {
-  size_t i;
-  if (x->length() != y->length()) SIMPLE_ERROR(BF("BitVectors aren't the same length for operation"));
-  for (size_t i = 0; i<x->_Data.number_of_words(); ++i ) {
-    (*x)._Data[i] &= (*y)._Data[i];
-  }
-}
-
-void SimpleBitVector_inPlaceXor(SimpleBitVector_sp x, SimpleBitVector_sp y) {
-  size_t i;
-  if (x->length() != y->length()) SIMPLE_ERROR(BF("BitVectors aren't the same length for operation"));
-  for (size_t i = 0; i<x->_Data.number_of_words(); ++i ) {
-    (*x)._Data[i] ^= (*y)._Data[i];
-  }
-}
-
-size_t SimpleBitVector_lowestIndex(SimpleBitVector_sp x) {
-  size_t word_length = x->length()/SimpleBitVector_O::BitWidth;
-  size_t ib = 0;
-  size_t iw = 0;
-  while (iw<word_length && x->_Data[iw]==0) {
-    ++iw;
-    ib = ib + SimpleBitVector_O::BitWidth;
-  }
-  for ( ; ib < x->length(); ib++) {
-    if (x->testBit(ib)) {
-      return ib;
-    }
-  }
-  return ib;
-}
-
-void SimpleBitVector_getOnIndices(SimpleBitVector_sp x, vector<size_t> &res) {
-  size_t i;
-  res.clear();
-  i = SimpleBitVector_lowestIndex(x);
-  for (; i != x->length(); i++) {
-    if (x->testBit(i)) {
-      res.push_back(i);
-    }
-  }
-}
-
-bool SimpleBitVector_isZero(SimpleBitVector_sp x) {
-  return (SimpleBitVector_lowestIndex(x) == x->length());
-}
 // ------------------------------------------------------------
 //
 // Class VectorNs
@@ -2214,6 +2055,17 @@ bool Str8Ns_O::equal(T_sp other) const {
   }
   return false;
 };
+
+bool Str8Ns_O::equalp(T_sp other) const {
+  if (&*other==this) return true;
+  if (!other.generalp()) return false;
+  if (cl__stringp(other)) {
+    String_sp sother = gc::As_unsafe<String_sp>(other);
+    TEMPLATE_HALF_STRING_DISPATCHER(this,sother,template_string_equalp_bool,0,this->length(),0,sother->length());
+  } else {
+    return this-> MDArray_O::equalp(other);
+  }
+}
 
 // Creators - depreciate these once the new array stuff is working better
 Str8Ns_sp Str8Ns_O::create(const string& nm) {
@@ -2299,6 +2151,17 @@ bool StrWNs_O::equal(T_sp other) const {
   return false;
 };
 
+bool StrWNs_O::equalp(T_sp other) const {
+  if (&*other==this) return true;
+  if (!other.generalp()) return false;
+  if (cl__stringp(other)) {
+    String_sp sother = gc::As_unsafe<String_sp>(other);
+    TEMPLATE_HALF_STRING_DISPATCHER(this,sother,template_string_equalp_bool,0,this->length(),0,sother->length());
+  } else {
+    return this->MDArray_O::equalp(other);
+  }
+}
+
 std::string StrWNs_O::get_std_string() const {
   std::string sout(this->length(),' ');
   for (size_t i(0),iEnd(this->length()); i<iEnd; ++i ) sout[i] = (*this)[i];
@@ -2334,115 +2197,12 @@ SimpleString_sp StrWNs_O::asMinimalSimpleString() const {
   }
 }
 
-// ------------------------------------------------------------
-//
-// Class BitVectorNs
-//
-//
-
 SYMBOL_EXPORT_SC_(ClPkg,vectorPushExtend);
-Fixnum_sp BitVectorNs_O::vectorPushExtend(T_sp newElement, size_t extension) {
-  unlikely_if (!this->_Flags.fillPointerP()) noFillPointerError(cl::_sym_vectorPushExtend,this->asSmartPtr());
-  cl_index idx = this->_FillPointerOrLengthOrDummy;
-//  printf("%s:%d  idx = %lld  this->_ArrayTotalSize = %zu\n", __FILE__, __LINE__, idx, this->_ArrayTotalSize );
-  unlikely_if (idx >= this->_ArrayTotalSize) {
-    unlikely_if (this->displacedToP()) {
-    // The array needs to be resized because it's displaced
-      if (extension <= 0) extension = calculate_extension(this->_ArrayTotalSize);
-      cl_index new_size = this->_ArrayTotalSize+extension;
-//      printf("%s:%d About to adjust displaced BitVectorNs_O size to %lld bits\n", __FILE__, __LINE__, new_size);
-      this->internalAdjustSize_(new_size);
-    } else {
-      size_t bytes_for_ArrayTotalSizeP1 = SimpleBitVector_O::bitunit_array_type::sizeof_for_length(this->_ArrayTotalSize+1);
-      size_t bytes_for_ArrayTotalSize = SimpleBitVector_O::bitunit_array_type::sizeof_for_length(this->_ArrayTotalSize);
-//      printf("%s:%d bytes_for_ArrayTotalSizeP1 = %zu\n", __FILE__, __LINE__, bytes_for_ArrayTotalSizeP1);
-//      printf("%s:%d bytes_for_ArrayTotalSize = %zu\n", __FILE__, __LINE__, bytes_for_ArrayTotalSize);
-      if (bytes_for_ArrayTotalSizeP1 > bytes_for_ArrayTotalSize) { // or it needs more words to store the bits
-    // The array needs to be resized because there aren't enough bits to hold the next bit
-        if (extension <= 0) extension = calculate_extension(this->_ArrayTotalSize);
-        cl_index new_size = this->_ArrayTotalSize+extension;
-//        printf("%s:%d About to adjust BitVectorNs_O size to %lld bits\n", __FILE__, __LINE__, new_size);
-        this->internalAdjustSize_(new_size);
-      } else {
-    // There were enough bits to handle the extend
-        this->_ArrayTotalSize = idx+1;
-        this->_Dimensions[0] = idx+1;
-      }
-    }
-  }
-  this->_Data->rowMajorAset(idx+this->_DisplacedIndexOffset,newElement);
-  ++this->_FillPointerOrLengthOrDummy;
-  return make_fixnum(idx);
-}
-
-void BitVectorNs_O::internalAdjustSize_(size_t size, T_sp initElement, bool initElementSupplied) {
-//  printf("%s:%d:%s    size = %zu\n", __FILE__, __LINE__, __FUNCTION__, size);
-  if (size == this->_ArrayTotalSize) return;
-  AbstractSimpleVector_sp basesv;
-  size_t start, end;
-  this->asAbstractSimpleVectorRange(basesv,start,end);
-  gctools::smart_ptr<simple_type> sv = gc::As_unsafe<gctools::smart_ptr<simple_type>>(basesv);
-  size_t initialContentsSize = MIN(this->length(),size);
-  gc::smart_ptr<simple_type> newData = simple_type::make(size,0,true);
-//  printf("%s:%d  class-of newData -> %s   newData.raw_() -> %p\n", __FILE__, __LINE__, _rep_(cl__class_of(newData)).c_str(), (void*)newData.raw_());
-  for (size_t i(0),iEnd(initialContentsSize); i<iEnd; ++i ) {
-//    printf("%s:%d   Reading bit at i+start->%zu  value-> %u    writing to index: %zu\n", __FILE__, __LINE__, i+start, sv->testBit(i+start), i);
-    newData->setBit(i,sv->testBit(i+start));
-  }
-  this->set_data(newData);
-  this->_ArrayTotalSize = size;
-  this->_Dimensions[0] = size;
-  if (!this->_Flags.fillPointerP()) this->_FillPointerOrLengthOrDummy = size;
-  this->_DisplacedIndexOffset = 0;
-  this->_Flags.set_displacedToP(false);
-}
-
-
-Array_sp BitVectorNs_O::reverse() const {
-  AbstractSimpleVector_sp basesv;
-  size_t start, end;
-  this->asAbstractSimpleVectorRange(basesv,start,end);
-  gctools::smart_ptr<simple_type> sv = gc::As_unsafe<gctools::smart_ptr<simple_type>>(basesv);
-  return ranged_bit_vector_reverse(sv,start,end);
-}
-
-Array_sp BitVectorNs_O::nreverse() {
-  AbstractSimpleVector_sp basesv;
-  size_t start, end;
-  this->asAbstractSimpleVectorRange(basesv,start,end);
-  gctools::smart_ptr<simple_type> sv = gc::As_unsafe<gctools::smart_ptr<simple_type>>(basesv);
-  ranged_bit_vector_nreverse(sv,start,end);
-  return this->asSmartPtr();
-}
-
-bool BitVectorNs_O::equal(T_sp other) const {
-  if (&*other==this) return true;
-  if (!other.generalp()) return false;
-  if (BitVectorNs_sp strns = other.asOrNull<BitVectorNs_O>()) {
-    AbstractSimpleVector_sp bme;
-    size_t mstart, mend;
-    this->asAbstractSimpleVectorRange(bme,mstart,mend);
-    simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-    AbstractSimpleVector_sp bso;
-    size_t ostart, oend;
-    strns->asAbstractSimpleVectorRange(bso,ostart,oend);
-    simple_type* so = reinterpret_cast<simple_type*>(&*bso);
-    return ranged_bit_vector_EQ_(*me,*so,mstart,mend,ostart,oend);
-  } else if (SimpleBitVector_sp ss = other.asOrNull<SimpleBitVector_O>()) {
-    AbstractSimpleVector_sp bme;
-    size_t mstart, mend;
-    this->asAbstractSimpleVectorRange(bme,mstart,mend);
-    simple_type* me = reinterpret_cast<simple_type*>(&*bme);
-    return ranged_bit_vector_EQ_(*me,*ss,mstart,mend,0,ss->length());
-  }
-  return false;
-};
 
 };
 // ------------------------------------------------------------
 //
 // MDArrayT
-
 
 namespace core {
 
@@ -2951,6 +2711,35 @@ CL_DEFUN Fixnum_sp cl__vector_push_extend(T_sp newElement, Vector_sp vec, size_t
   return vec->vectorPushExtend(newElement, extension);
 }
 
+CL_DEFUN void core__verify_simple_vector_layout(size_t length_offset, size_t data_offset)
+{
+  size_t cxx_length_offset = offsetof(SimpleVector_O,_Data._Length);
+  size_t cxx_data_offset = offsetof(SimpleVector_O,_Data._Data);
+  if (length_offset!=cxx_length_offset)
+    SIMPLE_ERROR(BF("length_offset %lu does not match cxx_length_offset %lu") % length_offset % cxx_length_offset );
+  if (data_offset!=cxx_data_offset)
+    SIMPLE_ERROR(BF("data_offset %lu does not match cxx_data_offset %lu") % data_offset % cxx_data_offset );
+}
+
+SYMBOL_EXPORT_SC_(KeywordPkg,vtable);
+SYMBOL_EXPORT_SC_(KeywordPkg,FillPointerOrLengthOrDummy);
+SYMBOL_EXPORT_SC_(KeywordPkg,ArrayTotalSize);
+SYMBOL_EXPORT_SC_(KeywordPkg,Data);
+SYMBOL_EXPORT_SC_(KeywordPkg,DisplacedIndexOffset);
+SYMBOL_EXPORT_SC_(KeywordPkg,Flags);
+SYMBOL_EXPORT_SC_(KeywordPkg,Rank);
+SYMBOL_EXPORT_SC_(KeywordPkg,Dimensions);
+
+CL_DEFUN void core__verify_mdarray_layout(T_sp alist)
+{
+  expect_offset(kw::_sym_FillPointerOrLengthOrDummy,alist,offsetof(MDArray_O,_FillPointerOrLengthOrDummy)-gctools::general_tag);
+  expect_offset(kw::_sym_ArrayTotalSize,alist,offsetof(MDArray_O,_ArrayTotalSize)-gctools::general_tag);
+  expect_offset(kw::_sym_Data,alist,offsetof(MDArray_O,_Data)-gctools::general_tag);
+  expect_offset(kw::_sym_DisplacedIndexOffset,alist,offsetof(MDArray_O,_DisplacedIndexOffset)-gctools::general_tag);
+  expect_offset(kw::_sym_Flags,alist,offsetof(MDArray_O,_Flags)-gctools::general_tag);
+  expect_offset(kw::_sym_Rank,alist,offsetof(MDArray_O,_Dimensions._Length)-gctools::general_tag);
+  expect_offset(kw::_sym_Dimensions,alist,offsetof(MDArray_O,_Dimensions._Data)-gctools::general_tag);
+}
 
 
 
@@ -3014,15 +2803,6 @@ CL_DEFUN List_sp core__split(const string& all, const string &chars) {
   }
   return first;
 }
-
-
-clasp_elttype clasp_array_elttype(T_sp a)
-{
-  return gc::As<Array_sp>(a)->elttype();
-}
-
-
-
 
 CL_DEFUN T_sp core__copy_to_simple_base_string(T_sp x)
 {

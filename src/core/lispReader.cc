@@ -111,7 +111,7 @@ struct Token {
   {                                                     \
       if ((x).consp()) {                                  \
       LOG_READ(BF("About to try trap bad cons"));            \
-      string ssss = core__source_file_info(x)->fileName(); \
+      string ssss = core__file_scope(x)->fileName(); \
     }                                                   \
   }
 #endif
@@ -172,7 +172,14 @@ trait_chr_type constituentChar(Character_sp ch, trait_chr_type trait = 0) {
     return (TRAIT_RATIOMARKER | x);
   if (x > ' ' && x < 127)
     return (TRAIT_ALPHABETIC | x);
-  return (TRAIT_INVALID | x);
+  // 2.1.4.2 Constituent Traits specifies the invalid traits
+  // Backspace Tab Newline Linefeed Page Return Space Rubout
+  // Nothing is said about other characters not in the list
+  // We treat them as TRAIT_ALPHABETIC.
+  if (x == BACKSPACE_CHAR || x == TAB_CHAR || x == NEWLINE_CHAR || x == LINE_FEED_CHAR
+      || x == PAGE_CHAR || x == RETURN_CHAR || x == ' ' || x == RUBOUT_CHAR)
+    return (TRAIT_INVALID | x);
+  else return (TRAIT_ALPHABETIC | x);
 LETTER:
   if (x == 'd' || x == 'D' || x == 'e' || x == 'E' || x == 'f' || x == 'F' || x == 's' || x == 'S' || x == 'l' || x == 'L')
     result |= TRAIT_EXPONENTMARKER;
@@ -994,9 +1001,9 @@ List_sp read_list(T_sp sin, claspCharacter end_char, bool allow_consing_dot) {
         }
         Cons_sp one = Cons_O::create(obj, _Nil<T_O>());
         LOG_READ(BF("One = %s") % _rep_(one));
-//        LOG_READ(BF("one->sourceFileInfo()=%s") % _rep_(core__source_file_info(one)));
-//        LOG_READ(BF("one->sourceFileInfo()->fileName()=%s") % core__source_file_info(one)->fileName());
-//        LOG_READ(BF("one->sourceFileInfo()->fileName().c_str() = %s") % core__source_file_info(one)->fileName().c_str());
+//        LOG_READ(BF("one->sourceFileInfo()=%s") % _rep_(core__file_scope(one)));
+//        LOG_READ(BF("one->sourceFileInfo()->fileName()=%s") % core__file_scope(one)->fileName());
+//        LOG_READ(BF("one->sourceFileInfo()->fileName().c_str() = %s") % core__file_scope(one)->fileName().c_str());
         TRAP_BAD_CONS(one);
         cur.asCons()->setCdr(one);
         cur = one;
@@ -1007,37 +1014,11 @@ List_sp read_list(T_sp sin, claspCharacter end_char, bool allow_consing_dot) {
 
 SYMBOL_SC_(CorePkg, STARsharp_equal_final_tableSTAR);
 
-struct increment_read_lisp_object_recursion_depth {
-  increment_read_lisp_object_recursion_depth() {
-    ++my_thread->read_recursion_depth;
-  }
-  ~increment_read_lisp_object_recursion_depth() {
-    --my_thread->read_recursion_depth;
-  }
-  static void reset() {
-    my_thread->read_recursion_depth = 0;
-  }
-  int value() const {
-    return my_thread->read_recursion_depth;
-  }
-  int max() const {
-    return 1024;
-  }
-};
-
-
 T_sp read_lisp_object(T_sp sin, bool eofErrorP, T_sp eofValue, bool recursiveP) {
   LOG_READ_SETUP();
   LOG_READ(BF("Entered read_lisp_object recursiveP=%d") % recursiveP);
   T_sp result = _Nil<T_O>();
   if (recursiveP) {
-    increment_read_lisp_object_recursion_depth recurse;
-#if 0
-    if (recurse.value() > recurse.max()) {
-      printf("%s:%d read_lisp_object_recursion_depth %d has exceeded max (%d) - there is a problem reading line %d",
-             __FILE__, __LINE__, recurse.value(), recurse.max(), clasp_input_lineno(sin));
-    }
-#endif
     while (1) {
       LOG_READ(BF("At top of while loop"));
       T_mv mv = lisp_object_query(sin, eofErrorP, eofValue, recursiveP);
@@ -1051,20 +1032,17 @@ T_sp read_lisp_object(T_sp sin, bool eofErrorP, T_sp eofValue, bool recursiveP) 
         if (cl::_sym_STARread_suppressSTAR->symbolValue().isTrue()) {
           LOG_READ(BF("read_suppress == true"));
           result = _Nil<T_O>();
-          break;
         }
         break;
       }
     }
   } else {
-    increment_read_lisp_object_recursion_depth::reset();
     DynamicScopeManager scope(_sym_STARsharp_equal_final_tableSTAR, _Nil<T_O>());
     LOG_READ(BF("About to call read_lisp_object"));
     result = read_lisp_object(sin, eofErrorP, eofValue, true);
     LOG_READ(BF("Came out of read_lisp_object with: |%s|") % _rep_(result).c_str());
   }
   LOG_READ(BF("Returning from read_lisp_object"));
-  if (result.nilp()) return (Values(_Nil<T_O>()));
   return (result);
 }
 
@@ -1073,7 +1051,7 @@ T_sp read_lisp_object(T_sp sin, bool eofErrorP, T_sp eofValue, bool recursiveP) 
       Read a character from the stream and based on what it is continue to process the
       stream until a complete symbol/number of macro is processed.
       Return the result in a MultipleValues object - if it is empty then nothing was read */
-__attribute__((optnone)) T_mv lisp_object_query(T_sp sin, bool eofErrorP, T_sp eofValue, bool recursiveP) {
+T_mv lisp_object_query(T_sp sin, bool eofErrorP, T_sp eofValue, bool recursiveP) {
 #if 0
   static int monitorReaderStep = 0;
   if ((monitorReaderStep % 1000) == 0 && cl__member(_sym_monitorReader, _sym_STARdebugMonitorSTAR->symbolValue(), _Nil<T_O>()).notnilp()) {

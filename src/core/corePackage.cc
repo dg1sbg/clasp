@@ -126,6 +126,8 @@ namespace core {
 const char *CorePkg_nicknames[] = {
     "SYSTEM", "sys", "SYS", "si", "SI", "" /*guard*/
 };
+SYMBOL_EXPORT_SC_(CorePkg, fixnump);
+SYMBOL_EXPORT_SC_(CorePkg, single_float_p);
 SYMBOL_EXPORT_SC_(CorePkg, STARuse_cleavir_compilerSTAR);  // nil (clasp) or T (cleavir)
 SYMBOL_EXPORT_SC_(CorePkg, STARstack_top_hintSTAR);
 SYMBOL_EXPORT_SC_(CorePkg, _PLUS_contab_name_PLUS_);
@@ -150,6 +152,7 @@ SYMBOL_EXPORT_SC_(CorePkg, make_source_pos_info);
 SYMBOL_EXPORT_SC_(ExtPkg, STARclasp_clang_pathSTAR);
 SYMBOL_EXPORT_SC_(CorePkg, STARinterrupts_enabledSTAR);
 SYMBOL_EXPORT_SC_(CorePkg, STARdebug_threadsSTAR);
+SYMBOL_EXPORT_SC_(CorePkg, STARdebug_dtree_interpreterSTAR);
 SYMBOL_EXPORT_SC_(CorePkg, STARallow_with_interruptsSTAR);
 SYMBOL_EXPORT_SC_(CorePkg, signal_servicing);
 SYMBOL_EXPORT_SC_(CorePkg, handle_signal);
@@ -194,7 +197,7 @@ SYMBOL_EXPORT_SC_(ExtPkg,unix_signal_received);
 SYMBOL_EXPORT_SC_(KeywordPkg,process);
 SYMBOL_EXPORT_SC_(KeywordPkg,code);
 SYMBOL_EXPORT_SC_(KeywordPkg,handler);
-SYMBOL_EXPORT_SC_(CorePkg,STARinformation_callbackSTAR);
+SYMBOL_EXPORT_SC_(ExtPkg,information_interrupt);
 
 
 SYMBOL_EXPORT_SC_(CorePkg, STARmpi_rankSTAR);
@@ -272,7 +275,6 @@ SYMBOL_EXPORT_SC_(ClPkg, subseq);
 
 SYMBOL_EXPORT_SC_(CorePkg, make_atom_cst);
 SYMBOL_EXPORT_SC_(CorePkg, make_cons_cst);
-SYMBOL_EXPORT_SC_(CorePkg, STARbits_in_bit_array_wordSTAR);
 SYMBOL_EXPORT_SC_(CorePkg, setf_subseq);
 SYMBOL_EXPORT_SC_(CorePkg,STARextension_startup_loadsSTAR);
 SYMBOL_EXPORT_SC_(CorePkg, multiple_value_foreign_call);
@@ -318,6 +320,7 @@ SYMBOL_EXPORT_SC_(KeywordPkg, append);
 SYMBOL_EXPORT_SC_(KeywordPkg, debugStartup);
 SYMBOL_EXPORT_SC_(KeywordPkg, debugStartupVerbose);
 SYMBOL_EXPORT_SC_(KeywordPkg, cclasp);
+SYMBOL_EXPORT_SC_(KeywordPkg, cst);
 SYMBOL_EXPORT_SC_(KeywordPkg, bclasp);
 SYMBOL_EXPORT_SC_(KeywordPkg, load);
 SYMBOL_EXPORT_SC_(KeywordPkg, eval);
@@ -576,11 +579,11 @@ SYMBOL_EXPORT_SC_(CorePkg, STARliteral_print_objectSTAR);
 SYMBOL_EXPORT_SC_(ClPkg, printObject);
 SYMBOL_EXPORT_SC_(ClPkg, makeCondition);
 SYMBOL_EXPORT_SC_(ClPkg, controlError);
+SYMBOL_EXPORT_SC_(CorePkg, outOfExtentUnwind);
 SYMBOL_EXPORT_SC_(KeywordPkg, print);
 SYMBOL_EXPORT_SC_(KeywordPkg, pathname);
 SYMBOL_SC_(CorePkg, setThrowPosition);
-SYMBOL_EXPORT_SC_(CorePkg, tooFewArgumentsError);
-SYMBOL_EXPORT_SC_(CorePkg, tooManyArgumentsError);
+SYMBOL_EXPORT_SC_(CorePkg, wrongNumberOfArguments);
 SYMBOL_EXPORT_SC_(KeywordPkg, object);
 SYMBOL_EXPORT_SC_(KeywordPkg, format_control);
 SYMBOL_EXPORT_SC_(KeywordPkg, format_arguments);
@@ -596,8 +599,9 @@ SYMBOL_EXPORT_SC_(ClPkg, array_has_fill_pointer_p);
 SYMBOL_EXPORT_SC_(ClPkg, simple_bit_vector);
 SYMBOL_EXPORT_SC_(ClPkg, bit_vector);
 
-
+SYMBOL_EXPORT_SC_(CorePkg, row_major_out_of_bounds);
 SYMBOL_EXPORT_SC_(CorePkg, array_out_of_bounds);
+SYMBOL_EXPORT_SC_(CorePkg, sequence_out_of_bounds);
 SYMBOL_EXPORT_SC_(KeywordPkg, array);
 SYMBOL_EXPORT_SC_(CorePkg, replaceArray);
 SYMBOL_EXPORT_SC_(CorePkg, fillArrayWithElt );
@@ -981,28 +985,6 @@ void CoreExposer_O::define_essential_globals(Lisp_sp lisp) {
   SYMBOL_EXPORT_SC_(ClPkg, most_positive_fixnum);
   cl::_sym_most_positive_fixnum->defconstant(make_fixnum(MOST_POSITIVE_FIXNUM));
 
-  // SYMBOL_EXPORT_SC_(ClPkg,most_negative_double_float);
-  // cl::_sym_most_negative_double_float->defconstant(DoubleFloat_O::create(DBL_MIN));
-  // SYMBOL_EXPORT_SC_(ClPkg,most_negative_long_float);
-  // cl::_sym_most_negative_long_float->defconstant(DoubleFloat_O::create(DBL_MIN));
-  // SYMBOL_EXPORT_SC_(ClPkg,most_negative_short_float);
-  // cl::_sym_most_negative_short_float->defconstant(DoubleFloat_O::create(DBL_MIN));
-  // SYMBOL_EXPORT_SC_(ClPkg,most_negative_single_float);
-  // cl::_sym_most_negative_single_float->defconstant(DoubleFloat_O::create(DBL_MIN));
-  // SYMBOL_EXPORT_SC_(ClPkg,most_positive_double_float);
-  // cl::_sym_most_positive_double_float->defconstant(DoubleFloat_O::create(DBL_MAX));
-  // SYMBOL_EXPORT_SC_(ClPkg,least_negative_normalized_long_float);
-  // cl::_sym_least_negative_normalized_long_float->defconstant(DoubleFloat_O::create(-std::numeric_limits<LongFloat>::denorm_min()));
-  // SYMBOL_EXPORT_SC_(ClPkg,least_positive_normalized_long_float);
-  // cl::_sym_least_positive_normalized_long_float->defconstant(DoubleFloat_O::create(std::numeric_limits<LongFloat>::denorm_min()));
-
-  // SYMBOL_EXPORT_SC_(ClPkg,most_positive_long_float);
-  // cl::_sym_most_positive_long_float->defconstant(DoubleFloat_O::create(DBL_MAX));
-  // SYMBOL_EXPORT_SC_(ClPkg,most_positive_short_float);
-  // cl::_sym_most_positive_short_float->defconstant(DoubleFloat_O::create(DBL_MAX));
-  // SYMBOL_EXPORT_SC_(ClPkg,most_positive_single_float);
-  // cl::_sym_most_positive_single_float->defconstant(DoubleFloat_O::create(DBL_MAX));
-
   cl::_sym_STARread_baseSTAR->defparameter(make_fixnum(10));
   SYMBOL_EXPORT_SC_(CorePkg, cl_fixnum_bits);
   _sym_cl_fixnum_bits->defconstant(make_fixnum(gc::fixnum_bits));
@@ -1198,7 +1180,6 @@ void CoreExposer_O::define_essential_globals(Lisp_sp lisp) {
   _sym_STARdebug_valuesSTAR->defparameter(_Nil<core::T_O>());
   _sym_STARdebug_hash_tableSTAR->defparameter(_Nil<core::T_O>());
   _sym_STARforeign_data_reader_callbackSTAR->defparameter(_Nil<core::T_O>());
-  _sym_STARinformation_callbackSTAR->defparameter(_Nil<core::T_O>());
   gctools::_sym_STARdebug_gcrootsSTAR->defparameter(_Nil<core::T_O>());
   int optimization_level = 3;
   const char* optLevel = getenv("CLASP_OPTIMIZATION_LEVEL");
@@ -1217,11 +1198,11 @@ void CoreExposer_O::define_essential_globals(Lisp_sp lisp) {
 #endif
   }
   comp::_sym_STARoptimization_levelSTAR->defparameter(core::make_fixnum(optimization_level));
-  _sym_STARbits_in_bit_array_wordSTAR->defparameter(core::clasp_make_fixnum(BIT_ARRAY_BYTE_SIZE));
   _sym_STARreader_generate_cstSTAR->defparameter(_Nil<core::T_O>());
   _sym_STARreader_cst_resultSTAR->defparameter(_Nil<core::T_O>());
   _sym_STARcache_macroexpandSTAR->defparameter(_Nil<core::T_O>());
   _sym_STARdebugByteCodeSTAR->defparameter(_Nil<core::T_O>());
+  _sym_STARdebug_dtree_interpreterSTAR->defparameter(_Nil<core::T_O>());
 #if defined(__x86_64__)
   SYMBOL_EXPORT_SC_(KeywordPkg, address_model_64);
   Symbol_sp address_model = kw::_sym_address_model_64;

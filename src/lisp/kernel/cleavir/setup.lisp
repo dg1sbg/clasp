@@ -4,8 +4,6 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (setq *echo-repl-read* t))
 
-(defvar *llvm-metadata*)
-
 (defvar *debug-cleavir* nil
   "controls if graphs are generated as forms are being compiled.")
 (defvar *debug-cleavir-literals* nil
@@ -16,6 +14,17 @@ when this is t a lot of graphs will be generated.")
 (defvar *ast* nil)
 (defvar *hir* nil)
 (defvar *mir* nil)
+
+;;; FIXME: Move this earlier
+;; changed by de/proclaim
+(defvar *ftypes* (make-hash-table :test #'equal))
+
+(defun global-ftype (name)
+  (multiple-value-bind (value presentp) (gethash name *ftypes*)
+    (if presentp value 'function)))
+
+(defun (setf global-ftype) (type name)
+  (setf (gethash name *ftypes*) type))
 
 (defmethod cst:reconstruct :around (expression cst (client clasp) &key (default-source nil default-source-p))
   (call-next-method expression cst client :default-source (if default-source-p
@@ -129,6 +138,7 @@ when this is t a lot of graphs will be generated.")
             (inline-status (core:global-inline-status function-name)))
        (make-instance 'cleavir-env:global-function-info
                       :name function-name
+                      :type (global-ftype function-name)
                       :compiler-macro (compiler-macro-function function-name)
                       :inline inline-status
                       :ast cleavir-ast)))

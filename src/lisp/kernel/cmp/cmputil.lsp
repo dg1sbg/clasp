@@ -103,6 +103,9 @@
 (defun warn-undefined-type (spi type)
   (compiler-style-warn spi "Undefined type %s" type))
 
+(defun warn-cannot-coerce (spi type)
+  (compiler-style-warn spi "Cannot coerce to type %s: unknown or not defined for coerce" type))
+
 (defun warn-invalid-number-type (spi type)
   (compiler-warn spi "Invalid number type: %s" type))
 
@@ -120,8 +123,8 @@
 (defun describe-source-location (spi)
   (let* ((lineno (source-pos-info-lineno spi))
          (filepos (source-pos-info-filepos spi))
-         (source-file-info (source-file-info spi))
-         (pathname (source-file-info-pathname source-file-info)))
+         (file-scope (file-scope spi))
+         (pathname (file-scope-pathname file-scope)))
   (bformat nil "%s filepos: %d  lineno: %d" (namestring pathname) filepos lineno)))
 
 (defun print-compiler-message (c stream)

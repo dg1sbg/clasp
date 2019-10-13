@@ -123,41 +123,6 @@ MaybeDebugStartup::~MaybeDebugStartup() {
   }
 }
 
-
-#ifdef CLASP_THREADS
-mp::SharedMutex global_internal_functions_mutex(INTRFUNC_NAMEWORD);
-#endif
-struct InternalFunctions {
-  const claspFunction* _InternalFunctions;
-  const char** _InternalFunctionNames;
-  size_t       _Length;
-  InternalFunctions(const claspFunction* funcs, const char** names, size_t len) : _InternalFunctions(funcs), _InternalFunctionNames(names), _Length(len) {};
-};
-  std::map<uintptr_t,InternalFunctions> global_internal_functions;
-
-void register_internal_functions(uintptr_t handle, const claspFunction* funcs, const char** names, size_t len) {
-//  printf("%s:%d:%s handle -> %p  funcs -> %p  names -> %p  len: %lu\n", __FILE__, __LINE__, __FUNCTION__, (void*)handle, (void*)funcs, (void*)names, len);
-  WITH_READ_WRITE_LOCK(global_internal_functions_mutex);
-  global_internal_functions.emplace(std::make_pair(handle,InternalFunctions(funcs,names,len)));
-}
-
-
-claspFunction lookup_internal_functions(uintptr_t handle, const char* name) {
-  WITH_READ_LOCK(global_internal_functions_mutex);
-  std::map<uintptr_t,InternalFunctions>::iterator fi = global_internal_functions.find(handle);
-  if (fi == global_internal_functions.end()) {
-    SIMPLE_ERROR(BF("Could not find the library with handle %lu") % handle);
-  }
-  for ( size_t num=0; num< fi->second._Length; ++num ) {
-    const char* lookup_name = fi->second._InternalFunctionNames[num];
-    if (strcmp(lookup_name,name)==0) {
-      return fi->second._InternalFunctions[num];
-    }
-  }
-  SIMPLE_ERROR(BF("Could not find internal function %s") % name);
-};
-
-  
 };
 
 
@@ -434,49 +399,6 @@ CL_DEFUN Fixnum core__rdtsc(){
     return ((uint64_t)hi << 32) | lo;
 }
 
-
-CL_LAMBDA(pow2);
-CL_DECLARE();
-CL_DOCSTRING("Evaluate a TaggedCast 2^pow2 times");
-CL_DEFUN Fixnum_sp core__test_tagged_cast(Fixnum_sp pow2) __attribute__((optnone)) {
-  Fixnum fpow2 = pow2.unsafe_fixnum();
-  Fixnum times = 1;
-  times = times << fpow2;
-  printf("%s:%d  fpow2 = %" PRF " times = %" PRF "\n", __FILE__, __LINE__, fpow2, times);
-  Environment_sp env = ValueEnvironment_O::createForNumberOfEntries(5, _Nil<T_O>());
-  Fixnum i;
-  Fixnum v = 0;
-  for (i = 0; i < times; ++i) {
-    f(env);
-    Environment_sp e = env.asOrNull<Environment_O>();
-    if (!e) {
-      SIMPLE_ERROR(BF("e is NULL!"));
-    }
-    v += f(e);
-  }
-  return Integer_O::create(v);
-}
-
-CL_LAMBDA(reps num);
-CL_DECLARE();
-CL_DOCSTRING("Calculate the num Fibonacci number reps times");
-CL_DEFUN Integer_sp core__cxx_fibn(Fixnum_sp reps, Fixnum_sp num) {
-  long int freps = reps.unsafe_fixnum();
-  long int fnum = num.unsafe_fixnum();
-  long int p1, p2, z;
-  for (long int r = 0; r < freps; ++r) {
-    p1 = 1;
-    p2 = 1;
-    long int rnum = fnum - 2;
-    for (long int i = 0; i < rnum; ++i) {
-      z = p1 + p2;
-      p2 = p1;
-      p1 = z;
-    }
-  }
-  return Integer_O::create((gctools::Fixnum)z);
-}
-
 T_sp varArgsList(int n_args, ...) {
   DEPRECATED();
   va_list ap;
@@ -511,8 +433,7 @@ CL_DEFUN T_mv core__mangle_name(Symbol_sp sym, bool is_function) {
     return Values(_Nil<T_O>(), name, make_fixnum(0), make_fixnum(CALL_ARGUMENTS_LIMIT));
   }
   Function_sp fsym = coerce::functionDesignator(sym);
-  if ( BuiltinClosure_sp  bcc = fsym.asOrNull<BuiltinClosure_O>()) {
-    (void)bcc; // suppress warning
+  if (gc::IsA<BuiltinClosure_sp>(fsym)) {
     return Values(_lisp->_true(), SimpleBaseString_O::make("Provide-c-func-name"), make_fixnum(0), make_fixnum(CALL_ARGUMENTS_LIMIT));
   }
   return Values(_Nil<T_O>(), SimpleBaseString_O::make("Provide-func-name"), make_fixnum(0), make_fixnum(CALL_ARGUMENTS_LIMIT));
@@ -941,7 +862,7 @@ CL_DEFUN T_mv core__funwind_protect(T_sp protected_fn, T_sp cleanup_fn) {
     // Save return values, then cleanup, then continue exit
     size_t nvals = lisp_multipleValues().getSize();
     T_O* mv_temp[nvals];
-    multipleValuesSaveToTemp(mv_temp);
+    multipleValuesSaveToTemp(nvals, mv_temp);
     {
       Closure_sp closure = gc::As_unsafe<Closure_sp>(cleanup_fn);
       closure->entry.load()(LCC_PASS_ARGS0_ELLIPSIS(closure.raw_()));
@@ -995,36 +916,22 @@ CL_DECLARE();
 CL_DOCSTRING("catchFunction");
 CL_DEFUN T_mv core__catch_function(T_sp tag, Function_sp thunk) {
   T_mv result;
-  int frame = my_thread->exceptionStack().push(CatchFrame, tag);
-  try {
+  CLASP_BEGIN_CATCH(tag) {
     result = thunk->entry.load()(LCC_PASS_ARGS0_ELLIPSIS(thunk.raw_()));
-  } catch (CatchThrow &catchThrow) {
-    if (catchThrow.getFrame() != frame) {
-      throw catchThrow;
-    }
-    result = gctools::multiple_values<T_O>::createFromValues();
-  }
-  my_thread->exceptionStack().unwind(frame);
+  } CLASP_END_CATCH(tag, result);
   return result;
 }
 
 CL_LAMBDA(tag result);
 CL_DECLARE();
-CL_DOCSTRING("throwFunction TODO: The semantics are not followed here - only the first return value is returned!!!!!!!!");
+CL_DOCSTRING("Like CL:THROW, but takes a thunk");
 CL_DEFUN void core__throw_function(T_sp tag, T_sp result_form) {
-  int frame = my_thread->exceptionStack().findKey(CatchFrame, tag);
-  if (frame < 0) {
-    CONTROL_ERROR();
-  }
   T_mv result;
   Closure_sp closure = result_form.asOrNull<Closure_O>();
   ASSERT(closure);
   result = closure->entry.load()(LCC_PASS_ARGS0_ELLIPSIS(closure.raw_()));
   result.saveToMultipleValue0();
-#ifdef DEBUG_TRACK_UNWINDS
-  global_CatchThrow_count++;
-#endif
-  throw CatchThrow(frame);
+  clasp_throw(tag);
 }
 
 CL_LAMBDA(symbols values func);
@@ -1071,12 +978,8 @@ CL_DEFUN T_sp core__run_function( T_sp object ) {
   if (thandle.notnilp() && gc::IsA<Pointer_sp>(thandle)) {
     handle = (uintptr_t)gc::As_unsafe<Pointer_sp>(thandle)->ptr();
   }
-#if 1
   claspFunction func = (claspFunction)dlsym((void*)handle,name.c_str());
 //  printf("%s:%d:%s running function %s  at %p\n", __FILE__, __LINE__, __FUNCTION__, name.c_str(), (void*)func);
-#else
-  claspFunction func = lookup_internal_functions(handle, name.c_str());
-#endif
 #ifdef DEBUG_SLOW
   MaybeDebugStartup startup((void*)func);
 #endif
@@ -1474,6 +1377,22 @@ CL_DEFUN void core__install_sigchld() {
 
 CL_DEFUN void core__uninstall_sigchld() {
   signal(SIGCHLD, SIG_DFL);
+}
+
+/* Match the offset in the alist to the expected offset
+*/
+void expect_offset(T_sp key, T_sp alist, size_t expected) {
+  List_sp pair = core__alist_assoc_eq(alist,key);
+  if (pair.nilp()) {
+    SIMPLE_ERROR(BF("Could not find key %s in alist %s") % _rep_(key) % _rep_(alist));
+  }
+  T_sp value = CONS_CDR(pair);
+  if (!value.fixnump()) {
+    SIMPLE_ERROR(BF("The value %s in alist %s at key %s must be a fixnum") % _rep_(value) % _rep_(alist) % _rep_(key));
+  }
+  if (value.unsafe_fixnum()!=expected) {
+    SIMPLE_ERROR(BF("The value %s in alist %s at key %s must match the C++ tagged offset of %d") % _rep_(value) % _rep_(alist) % _rep_(key) % expected);
+  }
 }
 
 };

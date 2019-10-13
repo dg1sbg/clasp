@@ -116,53 +116,6 @@ void error_InvocationHistoryStack(const InvocationHistoryFrame* frame, const Inv
   abort();
 };
 
-
-
-/*! Return the index of the stack entry with the matching key.
-      If return -1 then the key wasn't found */
-int ExceptionStack::findKey(FrameKind kind, T_sp key) {
-  for (int i(this->_Stack.size() - 1); i >= 0; --i) {
-    if (this->_Stack[i]._FrameKind == kind && this->_Stack[i]._Key == key)
-      return i;
-  }
-  return -1;
-}
-
-Vector_sp ExceptionStack::backtrace() {
-  if (this->_Stack.size() == 0) {
-    return _Nil<Vector_O>();
-  }
-  printf("%s:%d ExceptionStack::backtrace stack size = %zu\n", __FILE__, __LINE__, this->_Stack.size());
-  Vector_sp result = core__make_vector(_Nil<T_O>(), this->_Stack.size(), false, make_fixnum((int)(this->_Stack.size())));
-  for (int i(0), iEnd(this->_Stack.size()); i < iEnd; ++i) {
-    Symbol_sp kind;
-    SYMBOL_EXPORT_SC_(KeywordPkg, catchFrame);
-    SYMBOL_EXPORT_SC_(KeywordPkg, blockFrame);
-    SYMBOL_EXPORT_SC_(KeywordPkg, tagbodyFrame);
-    SYMBOL_EXPORT_SC_(KeywordPkg, landingPadFrame);
-    switch (this->_Stack[i]._FrameKind) {
-    case NullFrame:
-      kind = _Nil<Symbol_O>();
-      break;
-    case CatchFrame:
-      kind = kw::_sym_catchFrame;
-      break;
-    case BlockFrame:
-      kind = kw::_sym_blockFrame;
-      break;
-    case TagbodyFrame:
-      kind = kw::_sym_tagbodyFrame;
-      break;
-    case LandingPadFrame:
-      kind = kw::_sym_landingPadFrame;
-      break;
-    };
-    result->rowMajorAset(i, Cons_O::create(kind, this->_Stack[i]._Key));
-  }
-  return result;
-}
-
-
 void InvocationHistoryFrame::validate() const {
 #if 0
   T_sp res((gctools::Tagged)(((core::T_O**)(this->_args->reg_save_area))[LCC_CLOSURE_REGISTER]));
@@ -218,7 +171,7 @@ string InvocationHistoryFrame::argumentsAsString(int maxWidth) const {
   int nargs = cl__length(vargs);
   for (int i(0); i < nargs; ++i) {
     T_sp obj = vargs->rowMajorAref(i);
-    if (Instance_sp iobj = obj.asOrNull<Instance_O>()) {
+    if (gc::IsA<Instance_sp>(obj)) {
       clasp_write_string("#<", sout);
       write_ugly_object(cl__class_of(obj), sout);
       clasp_write_string("> ", sout);
@@ -242,7 +195,7 @@ string InvocationHistoryFrame::asStringLowLevel(Closure_sp closure,int index) co
   string funcName = _rep_(funcNameObj);
   uint lineNumber = closure->lineNumber();
   uint column = closure->column();
-  SourceFileInfo_sp sfi = gc::As<SourceFileInfo_sp>(core__source_file_info(closure->sourcePathname()));
+  FileScope_sp sfi = gc::As<FileScope_sp>(core__file_scope(closure->sourcePathname()));
   string sourceFileName = sfi->fileName();
   stringstream ss;
   string closureType = "/?";

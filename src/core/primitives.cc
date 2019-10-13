@@ -208,6 +208,7 @@ CL_DOCSTRING("lisp-implementation-version");
 CL_DEFUN T_sp cl__lisp_implementation_version() {
   stringstream ss;
   List_sp cleavir = gc::As<Cons_sp>(cl::_sym_STARfeaturesSTAR->symbolValue())->memberEq(kw::_sym_cclasp);
+  List_sp cst = gc::As<Cons_sp>(cl::_sym_STARfeaturesSTAR->symbolValue())->memberEq(kw::_sym_cst);
   if (cleavir.notnilp()) {
     ss << "c";
   }
@@ -220,6 +221,10 @@ CL_DEFUN T_sp cl__lisp_implementation_version() {
   ss << "boehm-";
 #endif
   ss << CLASP_VERSION;
+  if (cst.notnilp())
+    ss << "-cst";
+  else
+    ss << "-non-cst";
   return SimpleBaseString_O::make(ss.str());
 };
 
@@ -1059,76 +1064,6 @@ CL_DEFUN T_sp cl__read_preserving_whitespace(T_sp input_stream_designator, T_sp 
 /* -------------------------------------------------------- */
 /*     Sequence primitives                                  */
 
-
-ListOfSequenceSteppers::ListOfSequenceSteppers(List_sp sequences) {
-  this->_AtEnd = false;
-  for (auto cur : sequences) {
-    T_sp obj = oCar(cur);
-    if (Vector_sp vobj = obj.asOrNull<Vector_O>()) {
-      if (cl__length(vobj) == 0)
-        goto EMPTY;
-      VectorStepper_sp  vP(gc::GC<VectorStepper_O>::allocate(vobj));
-      this->_Steppers.push_back(vP);
-    } else if (Cons_sp cobj = obj.asOrNull<Cons_O>()) {
-      ConsStepper_sp cP(gc::GC<ConsStepper_O>::allocate(cobj));
-      this->_Steppers.push_back(cP);
-    } else if (obj.nilp()) {
-      goto EMPTY;
-    } else if (obj.generalp()) {
-      General_sp gobj((gctools::Tagged)obj.raw_());
-      SIMPLE_ERROR(BF("Illegal object for stepper[%s] class[%s]") % _rep_(gobj) % gobj->_instanceClass()->_classNameAsString());
-    }
-  }
-  this->_AtEnd = false;
-  return;
- EMPTY:
-  this->_AtEnd = true;
-}
-
-void ListOfSequenceSteppers::fillValueFrameUsingCurrentSteppers(ActivationFrame_sp frame) const {
-  if (this->_AtEnd)
-    SIMPLE_ERROR(BF("Tried to make list of ended stepper"));
-  int idx = 0;
-  ValueFrame_sp vframe = frame.as<ValueFrame_O>();
-  for (auto rit = this->_Steppers.begin(); rit != this->_Steppers.end(); rit++) {
-    vframe->set_entry(idx, (*rit)->element());
-    ++idx;
-  }
-}
-
-bool ListOfSequenceSteppers::advanceSteppers() {
-  _OF();
-  if (this->_AtEnd)
-    SIMPLE_ERROR(BF("Tried to advance ended stepper"));
-  for (auto it = this->_Steppers.begin(); it != this->_Steppers.end(); it++) {
-    this->_AtEnd |= (*it)->advance();
-  }
-  return !this->_AtEnd;
-}
-
-class ListOfListSteppers : public ListOfSequenceSteppers {
-public:
-  ListOfListSteppers(List_sp lists);
-  virtual ~ListOfListSteppers(){};
-};
-
-ListOfListSteppers::ListOfListSteppers(List_sp sequences) {
-  for (auto cur : sequences) {
-    T_sp obj = oCar(cur);
-    if (Cons_sp cobj = obj.asOrNull<Cons_O>()) {
-      ConsStepper_sp  cP(gc::GC<ConsStepper_O>::allocate(cobj));
-      this->_Steppers.push_back(cP);
-    } else {
-      goto EMPTY;
-    }
-  }
-  this->_AtEnd = false;
-  return;
- EMPTY:
-  this->_AtEnd = true;
-  return;
-}
-
 /* Only works on lists of lists - used to support macroexpansion backquote */
 bool test_every_some_notevery_notany(Function_sp predicate, List_sp sequences, bool elementTest, bool elementReturn, bool fallThroughReturn, T_sp &retVal) {
   if (!sequences.consp()) goto FALLTHROUGH;
@@ -1464,47 +1399,33 @@ CL_DEFUN Symbol_mv core__type_to_symbol(T_sp x) {
     return (Values(cl::_sym_list));
   else if (x.generalp()) {
     General_sp gx(x.unsafe_general());
-    if (DoubleFloat_sp dfx = gx.asOrNull<DoubleFloat_O>())
+    if (gc::IsA<DoubleFloat_sp>(gx))
       return (Values(cl::_sym_DoubleFloat_O));
-    else if (Symbol_sp sx = gx.asOrNull<Symbol_O>())
+    else if (gc::IsA<Symbol_sp>(gx))
       return (Values(cl::_sym_Symbol_O));
     else if (gx.nilp())
       return (Values(cl::_sym_Symbol_O)); // Return _sym_null??
-    else if (Bignum_sp bnx = gx.asOrNull<Bignum_O>())
+    else if (gc::IsA<Bignum_sp>(gx))
       return (Values(cl::_sym_Bignum_O));
-    else if (Ratio_sp rx = gx.asOrNull<Ratio_O>())
+    else if (gc::IsA<Ratio_sp>(gx))
       return (Values(cl::_sym_Ratio_O));
 #ifdef CLASP_LONG_FLOAT
-    else if (LongFloat_sp lfx = gx.asOrNull<LongFloat_O>())
+    else if (gc::IsA<LongFloat_sp>(gx))
       return (Values(cl::_sym_LongFloat_O));
 #endif
-    else if (Complex_sp cx = gx.asOrNull<Complex_O>())
+    else if (gc::IsA<Complex_sp>(gx))
       return (Values(cl::_sym_Complex_O));
-    else if (Package_sp px = gx.asOrNull<Package_O>())
+    else if (gc::IsA<Package_sp>(gx))
       return (Values(cl::_sym_Package_O));
-    else if (HashTable_sp htx = gx.asOrNull<HashTable_O>())
+    else if (gc::IsA<HashTable_sp>(gx))
       return (Values(cl::_sym_HashTable_O));
-#if 1
     else if (Array_sp ax = gx.asOrNull<Array_O>())
       // Handle all of the array subclasses using type_as_symbol()
       return Values(ax->array_type());
-#else
-    return (Values(cl::_sym_Array_O));
-    else if (SimpleVector_sp vx = gx.asOrNull<SimpleVector_O>())
-      return (Values(cl::_sym_simple_vector));
-    else if (VectorNs_sp vx = gx.asOrNull<VectorNs_O>())
-      return (Values(cl::_sym_vector));
-    else if (BitVector_sp bvx = gx.asOrNull<BitVector_O>())
-      return Values(bvx->type_symbol());
-    else if (BitVector_sp bvx = gx.asOrNull<BitVector_O>())
-      return Values(bvx->type_symbol());
-    else if (cl__stringp(gx))
-      return (Values(cl::_sym_string));
-#endif
-  //    else if ( x.isA<BaseString_O>() ) return(Values(_sym_BaseString_O));
-    else if (Stream_sp streamx = gx.asOrNull<Stream_O>())
+  //    else if ( x.isA<BaseString_sp>() ) return(Values(_sym_BaseString_O));
+    else if (gc::IsA<Stream_sp>(gx))
       return (Values(cl::_sym_Stream_O));
-    else if (ReadTable_sp rtx = gx.asOrNull<ReadTable_O>())
+    else if (gc::IsA<ReadTable_sp>(gx))
       return (Values(cl::_sym_ReadTable_O));
     return Values(gx->__class()->_className());
   }
@@ -1947,40 +1868,6 @@ CL_DECLARE();
 CL_DOCSTRING("bdsVal");
 CL_DEFUN T_sp core__bds_val(int idx) {
   return my_thread->bindings().val(idx);
-};
-
-CL_LAMBDA();
-CL_DECLARE();
-CL_DOCSTRING("exceptionStack");
-CL_DEFUN Vector_sp core__exception_stack() {
-  return my_thread->exceptionStack().backtrace();
-}
-
-CL_LAMBDA();
-CL_DECLARE();
-CL_DOCSTRING("exceptionStackDump");
-CL_DEFUN void core__exception_stack_dump() {
-  ExceptionStack &stack = my_thread->exceptionStack();
-  printf("Exception stack size: %zu members\n", stack.size());
-  for (int i(0); i < stack.size(); ++i) {
-    string kind;
-    switch (stack[i]._FrameKind) {
-    case CatchFrame:
-      kind = "catch";
-      break;
-    case BlockFrame:
-      kind = "block";
-      break;
-    case TagbodyFrame:
-      kind = "tagbody";
-      break;
-    default:
-      kind = "unknown";
-      break;
-    };
-    printf("Exception exceptionstack[%2d] = %8s %s@%p\n", i, kind.c_str(), _rep_(stack[i]._Key).c_str(), stack[i]._Key.raw_());
-  }
-  printf("----Done----\n");
 };
 
 CL_LAMBDA();

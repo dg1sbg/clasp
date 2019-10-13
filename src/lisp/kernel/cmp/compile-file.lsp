@@ -52,13 +52,16 @@
                  (let* ((link-string (if report-link-time
                                         (core:bformat nil " link(%.1f)" link-time)
                                         ""))
-                       (total-llvm-time (+ llvm-finalization-time (if report-link-time
-                                                                      link-time
-                                                                      0.0)))
-                       (percent-llvm-time (* 100.0 (/ total-llvm-time compiler-real-time )))
-                       (percent-time-string (if report-link-time
-                                                (core:bformat nil "(llvm+link)/real(%1.f%%)" percent-llvm-time)
-                                                (core:bformat nil "llvm/real(%1.f%%)" percent-llvm-time))))
+                        (total-llvm-time (+ llvm-finalization-time (if report-link-time
+                                                                       link-time
+                                                                       0.0)))
+                        (percent-llvm-time (if (zerop compiler-real-time)
+                                               0.0
+                                               (* 100.0 (/ total-llvm-time compiler-real-time))))
+                        (percent-time-string
+                          (if report-link-time
+                              (core:bformat nil "(llvm+link)/real(%1.f%%)" percent-llvm-time)
+                              (core:bformat nil "llvm/real(%1.f%%)" percent-llvm-time))))
                    #+(or)(core:bformat t "   %s seconds real(%.1f) run(%.1f) llvm(%.1f)%s %s%N"
                                  message
                                  compiler-real-time
@@ -154,6 +157,10 @@ and the pathname of the source file - this will also be used as the module initi
 
 (defvar *compile-file-output-pathname* nil)
 
+(defun compile-file-source-pos-info (stream)
+  (core:input-stream-source-pos-info
+   stream *compile-file-file-scope*
+   *compile-file-source-debug-lineno* *compile-file-source-debug-offset*))
 
 (defun bclasp-loop-read-and-compile-file-forms (source-sin environment)
   (let ((eof-value (gensym)))
@@ -161,7 +168,7 @@ and the pathname of the source file - this will also be used as the module initi
       ;; Required to update the source pos info. FIXME!?
       (peek-char t source-sin nil)
       ;; FIXME: if :environment is provided we should probably use a different read somehow
-      (let ((core:*current-source-pos-info* (core:input-stream-source-pos-info source-sin))
+      (let ((core:*current-source-pos-info* (compile-file-source-pos-info source-sin))
             (form (read source-sin nil eof-value)))
         (if (eq form eof-value)
             (return nil)
@@ -183,8 +190,6 @@ and the pathname of the source file - this will also be used as the module initi
                                  compile-file-hook
                                  type
                                  output-type
-                                 source-debug-pathname
-                                 (source-debug-offset 0)
                                  environment
                                  image-startup-position
                                  (optimize t)
@@ -194,18 +199,10 @@ and the pathname of the source file - this will also be used as the module initi
 - output-path :: A pathname.
 - compile-file-hook :: A function that will do the compile-file
 - type :: :kernel or :user (I'm not sure this is useful anymore)
-- source-debug-pathname :: A pathname.
-- source-debug-offset :: An integer.
 - environment :: Arbitrary, passed only to hook
 Compile a lisp source file into an LLVM module."
   ;; TODO: Save read-table and package with unwind-protect
   (let* ((*package* *package*)
-         (clasp-source-root (translate-logical-pathname "source-dir:"))
-         (clasp-source (merge-pathnames (make-pathname :directory '(:relative :wild-inferiors) :name :wild :type :wild) clasp-source-root))
-         (source-location
-           (if (pathname-match-p given-input-pathname clasp-source)
-               (enough-namestring given-input-pathname clasp-source-root)
-               given-input-pathname))
          (input-pathname (or (probe-file given-input-pathname)
 			     (error 'core:simple-file-error
 				    :pathname given-input-pathname
@@ -217,47 +214,52 @@ Compile a lisp source file into an LLVM module."
 	 warnings-p failure-p)
     (or module (error "module is NIL"))
     (with-open-stream (sin source-sin)
-      ;; If a truename is provided then spoof the file-system to treat input-pathname
-      ;; as source-truename with the given offset
-      (when source-debug-pathname
-        (core:source-file-info (namestring input-pathname) source-debug-pathname source-debug-offset nil))
       (when *compile-verbose*
 	(bformat t "; Compiling file: %s%N" (namestring input-pathname)))
-      (let* ((*compilation-module-index* 0) ; FIXME: necessary?
-             (*compile-file-pathname* (pathname (merge-pathnames given-input-pathname)))
-             (*compile-file-truename* (translate-logical-pathname *compile-file-pathname*))
-             run-all-name)
+      (let (run-all-name)
         (with-module (:module module
                       :optimize (when optimize #'optimize-module-for-compile-file)
                       :optimize-level optimize-level)
-          (with-source-pathnames (:source-pathname *compile-file-truename* ;(namestring source-location)
-                                  :source-debug-pathname source-debug-pathname
-                                  :source-debug-offset source-debug-offset)
-            ;; (1) Generate the code
-            (with-debug-info-generator (:module *the-module*
-                                        :pathname *compile-file-truename*)
-              (or module (error "module is NIL"))
-              (with-make-new-run-all (run-all-function (namestring input-pathname))
-                (with-literal-table
-                    (loop-read-and-compile-file-forms source-sin environment compile-file-hook))
-                (setf run-all-name (llvm-sys:get-name run-all-function))))
-            (cmp-log "About to verify the module%N")
-            (cmp-log-dump-module *the-module*)
-            (irc-verify-module-safe *the-module*)
-            (quick-module-dump *the-module* "preoptimize")
-            ;; (2) Add the CTOR next
-            (make-boot-function-global-variable module run-all-name
-                                                :position image-startup-position
-                                                :register-library t)
-            ;; (3) If optimize ALWAYS link the builtins in, inline them and then remove them - then optimize.
-            (if (> optimize-level 0)
-                (link-inline-remove-builtins *the-module*)))
-          ;; Now at the end of with-module another round of optimization is done
-          ;; but the RUN-ALL is now referenced by the CTOR and so it won't be optimized away
-          ;; ---- MOVE OPTIMIZATION in with-module to HERE ----
-          )
-        (quick-module-dump module "postoptimize")
-        module))))
+          ;; (1) Generate the code
+          (with-debug-info-generator (:module *the-module*
+                                      :pathname *compile-file-source-debug-pathname*)
+            (or module (error "module is NIL"))
+            (with-make-new-run-all (run-all-function (namestring input-pathname))
+              (with-literal-table
+                  (loop-read-and-compile-file-forms source-sin environment compile-file-hook))
+              (setf run-all-name (llvm-sys:get-name run-all-function))))
+          (cmp-log "About to verify the module%N")
+          (cmp-log-dump-module *the-module*)
+          (irc-verify-module-safe *the-module*)
+          (quick-module-dump *the-module* "preoptimize")
+          ;; (2) Add the CTOR next
+          (make-boot-function-global-variable module run-all-name
+                                              :position image-startup-position
+                                              :register-library t))
+        ;; Now at the end of with-module another round of optimization is done
+        ;; but the RUN-ALL is now referenced by the CTOR and so it won't be optimized away
+        ;; ---- MOVE OPTIMIZATION in with-module to HERE ----
+        )
+      (quick-module-dump module "postoptimize")
+      module)))
+
+(defun generate-info (input-file output-info-pathname)
+  "Write information about the compile-file to the .info file"
+  (with-open-file (fout output-info-pathname :direction :output :if-exists :supersede)
+    (format fout "Compile-file-info ~a~%" input-file)
+    (maphash (lambda (inlinee-name count-ht)
+               (let ((is-inline (gethash :inline count-ht)))
+                 (maphash (lambda (inlined-name count)
+                            (unless (eq :inline inlined-name)
+                              (let ((real-count (if is-inline
+                                                    (/ count 3)
+                                                    count)))
+                                (format fout "inlined-into \"~a\" \"~a\" ~a~%"
+                                        (cmp:jit-function-name inlinee-name)
+                                        (cmp:jit-function-name inlined-name)
+                                        real-count))))
+                          count-ht)))
+             *track-inlined-functions*)))
 
 (defun compile-file-serial (input-file
                             &key
@@ -267,11 +269,8 @@ Compile a lisp source file into an LLVM module."
                               (optimize t)
                               (optimize-level *optimization-level*)
                               (external-format :default)
-                              ;; If we are spoofing the source-file system to treat given-input-name
-                              ;; as a part of another file then use source-debug-pathname to provide the
-                              ;; truename of the file we want to mimic
-                              source-debug-pathname
-                              ;; This is the offset we want to spoof
+                              (source-debug-pathname nil cfsdpp)
+                              (source-debug-lineno 0)
                               (source-debug-offset 0)
                               ;; output-type can be (or :fasl :bitcode :object)
                               (output-type :fasl)
@@ -281,7 +280,9 @@ Compile a lisp source file into an LLVM module."
                               ;; will be linked together
                               (unique-symbol-prefix "")
                               ;; Control the order of startup functions
-                              (image-startup-position (core:next-startup-position))
+                              (image-startup-position (core:next-startup-position)) 
+                              ;; Generate an info file for the compilation T or NIL
+                              (output-info (member :DEBUG-COMPILE-FILE-OUTPUT-INFO *features*))
                               ;; ignored by bclasp
                               ;; but passed to hook functions
                               environment)
@@ -289,25 +290,36 @@ Compile a lisp source file into an LLVM module."
   #+debug-monitor(sys:monitor-message "compile-file ~a" input-file)
   (if (not output-file-p) (setq output-file (cfp-output-file-default input-file output-type)))
   (with-compiler-env ()
-    ;; Do the different kind of compile-file here
-    (let* ((*compile-print* print)
+    (let* ((output-path (compile-file-pathname input-file :output-file output-file :output-type output-type ))
+           (*track-inlined-functions* (make-hash-table :test #'equal))
+           (output-info-pathname (when output-info (make-pathname :type "info" :defaults output-path)))
+           (*compilation-module-index* 0) ; FIXME: necessary?
+           ;; KLUDGE: We could just bind these in the lambda list,
+           ;; except the interpreter can't handle that and will die messily.
            (*compile-verbose* verbose)
-           (output-path (compile-file-pathname input-file :output-file output-file :output-type output-type ))
+           (*compile-print* print)
+           (*compile-file-pathname* (pathname (merge-pathnames input-file)))
+           (*compile-file-truename* (translate-logical-pathname *compile-file-pathname*))
+           (*compile-file-source-debug-pathname*
+             (if cfsdpp source-debug-pathname *compile-file-truename*))
+           (*compile-file-file-scope*
+             (core:file-scope *compile-file-source-debug-pathname*))
+           (*compile-file-source-debug-lineno* source-debug-lineno)
+           (*compile-file-source-debug-offset* source-debug-offset)
            (*compile-file-output-pathname* output-path)
            (*compile-file-unique-symbol-prefix* unique-symbol-prefix))
-      (with-compiler-timer (:message "Compile-file" :report-link-time t :verbose verbose)
+      (with-compiler-timer (:message "Compile-file" :report-link-time t :verbose *compile-verbose*)
         (with-compilation-results ()
           (let ((module (compile-file-to-module input-file
                                                 :type type
                                                 :output-type output-type
-                                                :source-debug-pathname source-debug-pathname
-                                                :source-debug-offset source-debug-offset
                                                 :compile-file-hook *cleavir-compile-file-hook*
                                                 :environment environment
                                                 :image-startup-position image-startup-position
                                                 :optimize optimize
                                                 :optimize-level optimize-level)))
             (output-module module output-file output-type output-path input-file type)
+            (when output-info-pathname (generate-info input-file output-info-pathname))
             output-path))))))
 
 (defun reloc-model ()

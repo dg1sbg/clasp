@@ -6,60 +6,14 @@
   "controls if cleavir debugging is carried out on literal compilation. 
 when this is t a lot of graphs will be generated.")
 
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
 ;;; Set the source-position for an instruction
 ;;;
 
-(defun get-or-register-file-metadata (fileid)
-  (let ((file-metadata (gethash fileid *llvm-metadata*)))
-    (unless file-metadata
-      (let* ((sfi (core:source-file-info fileid))
-             (pathname (core:source-file-info-pathname sfi))
-             (metadata (cmp:make-file-metadata pathname)))
-        (setf file-metadata metadata)
-        (setf (gethash fileid *llvm-metadata*) file-metadata)))
-    file-metadata))
-
 ;;; In CSTs and stuff the origin is (spi . spi). Use the head.
 (defun origin-spi (origin)
   (if (consp origin) (car origin) origin))
-
-(defun set-instruction-source-position (origin function-metadata)
-  (when cmp:*dbg-generate-dwarf*
-    (if origin
-        (let ((source-pos-info (if (consp origin) (car origin) origin)))
-          (cmp:dbg-set-irbuilder-source-location-impl
-           cmp:*irbuilder*
-           (core:source-pos-info-lineno source-pos-info)
-           (1+ (core:source-pos-info-column source-pos-info))
-           function-metadata))
-        (cmp:dbg-clear-irbuilder-source-location-impl cmp:*irbuilder*))))
-
-
-(defvar *current-source-position* nil)
-(defvar *current-function-metadata* nil)
-
-(defun do-debug-info-source-position (enabledp origin function-metadata body-lambda)
-  (if (and enabledp (null origin))
-      (funcall body-lambda)
-      (unwind-protect
-           (let ((*current-source-position* origin)
-                 (*current-function-metadata* function-metadata))
-             (set-instruction-source-position origin function-metadata)
-             (funcall body-lambda))
-        (set-instruction-source-position *current-source-position* *current-function-metadata*))))
-
-(defmacro with-debug-info-source-position ((origin function-metadata) &body body)
-  `(do-debug-info-source-position t ,origin ,function-metadata (lambda () ,@body)))
-
-(defmacro with-debug-info-disabled ((metadata) &body body)
-  `(with-debug-info-source-position ((ensure-origin nil 999998) ,metadata)
-     ,@body))
-
-#+(or)
-(defmacro with-debug-info-disabled (&body body)
-  `(do-debug-info-source-position nil nil nil (lambda () ,@body)))
 
 ;;;
 ;;; the first argument to this function is an instruction that has a
@@ -79,7 +33,7 @@ when this is t a lot of graphs will be generated.")
                  (ssablep (first (cleavir-ir:inputs instruction)))
                  (ssablep (first (cleavir-ir:outputs instruction))))
         (format *error-output* "   but it doesn't matter because both input and output are ssablep~%")))
-    (with-debug-info-source-position ((ensure-origin origin 999993) (metadata current-function-info))
+    (cmp:with-debug-info-source-position ((ensure-origin origin 999993))
       (call-next-method))))
 
 (defgeneric translate-branch-instruction
@@ -89,24 +43,41 @@ when this is t a lot of graphs will be generated.")
     (instruction return-value successors abi current-function-info)
   (let ((origin (cleavir-ir:origin instruction)))
     (when (and *trap-null-origin* (null (cleavir-ir:origin instruction)))
-;;;    (error "translate-branch-instruction :around")
       (format *error-output* "Instruction with nil origin: ~a  origin: ~a~%" instruction (cleavir-ir:origin instruction)))
-    (with-debug-info-source-position ((ensure-origin origin 9995) (metadata current-function-info))
+    (cmp:with-debug-info-source-position ((ensure-origin origin 9995))
       (call-next-method))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Helpers for translating HIR locations to LLVM variables.
 
-(defvar *basic-blocks*)
-(defvar *ownerships*)
-(defvar *tags*)
-(defvar *vars*)
+;;; HIR is not in SSA form, so in general we can use allocas and load/store to
+;;; simulate those variables in llvm - it can then run the mem2reg pass to
+;;; convert that to SSA and avoid touching memory if possible.
+;;; We try to make things easier for LLVM by translating HIR data as SSA
+;;; variables if they happen to have only one static definition already.
+;;; This ALMOST works, but due to how HIR is generated, in one obscure case
+;;; with unwinds, the correct HIR has a use-before-define. See bug #642.
+;;; Example: (values (block nil ((lambda () (return (loop))))))
+;;; As such, we fall back to an alloca rather than signaling an error.
+;;; The better thing to do would be to have Cleavir not generate this kind of
+;;; HIR, so we could treat a use-before-define as a bug. FIXME FIXME FIXME
+
+(defvar *datum-variables*)
+(defvar *datum-allocas*)
 
 (defun datum-name-as-string (datum)
   ;; We need to write out setf names as well as symbols, in a simple way.
   ;; "simple" means no pretty printer, for a start.
-  (write-to-string (cleavir-ir:name datum)
-                   :escape nil
-                   :readably nil
-                   :pretty nil))
+  ;; Using SYMBOL-NAME like this is about 25x faster than using write-to-string,
+  ;; and this function is called rather a lot so it's nice to make it faster.
+  (let ((name (cleavir-ir:name datum)))
+    (if (symbolp name)
+        (symbol-name name)
+        (write-to-string name
+                         :escape nil
+                         :readably nil
+                         :pretty nil))))
 
 (defun make-datum-alloca (datum)
   (etypecase datum
@@ -115,9 +86,22 @@ when this is t a lot of graphs will be generated.")
     (cleavir-ir:lexical-location
      (cmp:alloca-t* (datum-name-as-string datum)))))
 
+(defun new-datum-alloca (datum)
+  (setf (gethash datum *datum-allocas*) (make-datum-alloca datum)))
+
 (defun datum-alloca (datum)
-  (or (gethash datum *vars*)
-      (setf (gethash datum *vars*) (make-datum-alloca datum))))
+  (gethash datum *datum-allocas*))
+
+(defun ensure-datum-alloca (datum)
+  (or (datum-alloca datum) (new-datum-alloca datum)))
+
+(defun datum-variable (datum)
+  (gethash datum *datum-variables*))
+
+(defun new-datum-variable (datum value)
+  (unless (null (datum-variable datum))
+    (error "BUG: SSAable output ~a previously defined" datum))
+  (setf (gethash datum *datum-variables*) value))
 
 (defun ssablep (location)
   (let ((defs (cleavir-ir:defining-instructions location)))
@@ -128,22 +112,28 @@ when this is t a lot of graphs will be generated.")
     ((typep datum 'cleavir-ir:immediate-input)
      (cmp:irc-int-to-ptr (%i64 (cleavir-ir:value datum)) cmp:%t*%))
     ((typep datum 'cleavir-ir:lexical-location)
-     (let ((existing (gethash datum *vars*)))
-       (if (null existing)
-           (error "BUG: Input ~a not previously defined" datum)
-           (if (ssablep datum)
-               existing
-               (cmp:irc-load existing label)))))
+     (let ((alloca (datum-alloca datum)))
+       (if (null alloca)
+           (or (datum-variable datum)
+               #+(or)
+               (error "BUG: Input ~a not previously defined" datum)
+               (cmp:irc-load (new-datum-alloca datum) label))
+           (cmp:irc-load alloca))))
     (t (error "datum ~s must be an immediate-input or lexical-location"
               datum))))
 
 (defun out (value datum &optional (label ""))
   (if (ssablep datum)
-      (progn
-        (unless (null (gethash datum *vars*))
-          (error "BUG: SSAable output ~a previously defined" datum))
-        (setf (gethash datum *vars*) value))
-      (cmp:irc-store value (datum-alloca datum) label)))
+      (new-datum-variable datum value)
+      (cmp:irc-store value (ensure-datum-alloca datum) label)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Translate
+
+(defvar *basic-blocks*)
+(defvar *ownerships*)
+(defvar *tags*)
 
 (defun layout-basic-block (basic-block return-value abi current-function-info)
   (with-accessors ((first cleavir-basic-blocks:first-instruction)
@@ -168,7 +158,7 @@ when this is t a lot of graphs will be generated.")
                         ;; one successor: we have to do branching ourselves.
                         (translate-simple-instruction
                          instruction return-value abi current-function-info)
-                        (with-debug-info-source-position ((ensure-origin (cleavir-ir:origin instruction) 999981) (metadata current-function-info))
+                        (cmp:with-debug-info-source-position ((ensure-origin (cleavir-ir:origin instruction) 999981))
                           (cmp:irc-br (first successor-tags))))
                        (t ; 0 or 2 or more successors: it handles branching.
                         (translate-branch-instruction
@@ -207,12 +197,17 @@ when this is t a lot of graphs will be generated.")
                           function-info
                           initial-instruction abi &key (linkage 'llvm-sys:internal-linkage))
   (cmp:with-irbuilder (cmp:*irbuilder-function-alloca*)
-    (let ((return-value (cmp:alloca-return "return-value")))
-      ;; in case of a non-local exit, zero out the number of returned values
+    (let ((return-value (alloca-return)))
+      ;; NOTE: This initialization is required due to the possibility that a function
+      ;; nonlocally exits without having set the return-value, as happens with e.g.
+      ;; the (lambda (c) (go outside)) functions handler-case uses.
+      ;; The unwind-instruction will save an uninitialized nret into the multiple value
+      ;; vector and try to write in that many values; this causes crashes.
       (with-return-values (return-value abi nret ret-regs)
+        (declare (ignore ret-regs))
         (cmp:irc-store (%size_t 0) nret))
       (cmp:with-irbuilder (body-irbuilder)
-        (with-debug-info-source-position ((ensure-origin (cleavir-ir:origin initial-instruction) 999970) cmp:*dbg-current-function-metadata*)
+        (cmp:with-debug-info-source-position ((ensure-origin (cleavir-ir:origin initial-instruction) 999970) )
           (cmp:with-dbg-lexical-block
               (:lineno (core:source-pos-info-lineno (instruction-source-pos-info (cleavir-basic-blocks:first-instruction first-basic-block))))
             (cmp:irc-set-insert-point-basic-block body-block body-irbuilder)
@@ -221,12 +216,12 @@ when this is t a lot of graphs will be generated.")
               (layout-basic-block first-basic-block return-value abi function-info)
               (loop for block in rest-basic-blocks
                     for instruction = (cleavir-basic-blocks:first-instruction block)
-                    do (with-debug-info-source-position ((ensure-origin (cleavir-ir:origin instruction) 999983) cmp:*dbg-current-function-metadata*)
+                    do (cmp:with-debug-info-source-position ((ensure-origin (cleavir-ir:origin instruction) 999983))
                          (cmp:irc-begin-block (gethash instruction *tags*)))
                        (layout-basic-block block return-value abi function-info)))
             ;; finish up by jumping from the entry block to the body block
             (cmp:with-irbuilder (cmp:*irbuilder-function-alloca*)
-              (with-debug-info-source-position ((ensure-origin (cleavir-ir:origin initial-instruction) 999985) cmp:*dbg-current-function-metadata*)
+              (cmp:with-debug-info-source-position ((ensure-origin (cleavir-ir:origin initial-instruction) 999985))
                 (cmp:irc-br body-block)))
             (cc-dbg-when *debug-log* (format *debug-log* "----------end layout-procedure ~a~%"
                                              (llvm-sys:get-name the-function)))
@@ -267,14 +262,7 @@ when this is t a lot of graphs will be generated.")
 
 (defun calculate-function-info (enter llvm-function-name)
   (let* ((origin (cleavir-ir:origin enter))
-         (source-pos-info (origin-spi origin))
-         (lineno 0)
-         (column 0)
-         (filepos 0))
-    (when (and source-pos-info (typep source-pos-info 'core:source-pos-info))
-      (setf lineno (core:source-pos-info-lineno source-pos-info)
-            column (1+ (core:source-pos-info-column source-pos-info))
-            filepos (core:source-pos-info-filepos source-pos-info)))
+         (source-pos-info (origin-spi origin)))
     (cond
       ((typep enter 'clasp-cleavir-hir:named-enter-instruction)
        (cmp:make-function-info :function-name llvm-function-name
@@ -282,21 +270,18 @@ when this is t a lot of graphs will be generated.")
                                :docstring (clasp-cleavir-hir:docstring enter)
                                :declares nil
                                :form nil
-                               :lineno lineno
-                               :column column
-                               :filepos filepos))
+                               :spi source-pos-info))
       ((typep enter 'cleavir-ir:enter-instruction)
        (cmp:make-function-info :function-name llvm-function-name
                                :lambda-list nil
                                :docstring nil
                                :declares nil
                                :form nil
-                               :lineno lineno
-                               :column column
-                               :filepos filepos))
-      (t (error "layout-procedure enter is not a known type of enter-instruction - it is a ~a - handle it" enter)))))
+                               :spi source-pos-info))
+      (t (error "layout-procedure enter is not a known type of enter-instruction - it is ~a"
+                enter)))))
 
-(defun layout-procedure (enter lambda-name abi &key (linkage 'llvm-sys:internal-linkage) ignore-arguments)
+(defun layout-procedure (enter lambda-name abi &key (linkage 'llvm-sys:internal-linkage))
   (let* ((function-info (gethash enter *map-enter-to-function-info*))
          ;; Gather the basic blocks of this procedure in basic-blocks
          (basic-blocks (function-basic-blocks enter))
@@ -350,16 +335,15 @@ when this is t a lot of graphs will be generated.")
           ;; Generate code to get the arguments into registers.
           ;; (Actual lambda list stuff is covered by ENTER-INSTRUCTION.)
           (cmp:with-irbuilder (cmp:*irbuilder-function-alloca*)
-            (with-debug-info-source-position ((ensure-origin (cleavir-ir:origin enter) 999980) (metadata function-info))
+            (cmp:with-debug-info-source-position ((ensure-origin (cleavir-ir:origin enter) 999980))
               (let* ((fn-args (llvm-sys:get-argument-list cmp:*current-function*))
                      (lambda-list (cleavir-ir:lambda-list enter))
                      (calling-convention
                        (cmp:setup-calling-convention
                         fn-args
-                        :debug-on (and (null ignore-arguments) (debug-on function-info))
+                        :debug-on (debug-on function-info)
                         :cleavir-lambda-list lambda-list
-                        :rest-alloc (clasp-cleavir-hir:rest-alloc enter)
-                        :ignore-arguments ignore-arguments)))
+                        :rest-alloc (clasp-cleavir-hir:rest-alloc enter))))
                 (setf (calling-convention function-info) calling-convention))
               (layout-procedure* the-function
                                  body-irbuilder
@@ -374,10 +358,10 @@ when this is t a lot of graphs will be generated.")
 ;; multiply accessible in the HIR.
 ;; We assume that the ABI and linkage will not change.
 (defvar *compiled-enters*)
-(defun memoized-layout-procedure (enter lambda-name abi &key (linkage 'llvm-sys:internal-linkage) ignore-arguments)
+(defun memoized-layout-procedure (enter lambda-name abi &key (linkage 'llvm-sys:internal-linkage))
   (or (gethash enter *compiled-enters*)
       (setf (gethash enter *compiled-enters*)
-            (layout-procedure enter lambda-name abi :linkage linkage :ignore-arguments ignore-arguments))))
+            (layout-procedure enter lambda-name abi :linkage linkage))))
 
 (defun log-translate (initial-instruction)
   (let ((mir-pathname (make-pathname :name (format nil "mir~a" (incf *debug-log-index*))
@@ -413,15 +397,15 @@ when this is t a lot of graphs will be generated.")
     uninitialized))
 
 (defun translate (initial-instruction map-enter-to-function-info go-indices
-                  &key (abi *abi-x86-64*) (linkage 'llvm-sys:internal-linkage)
-                    ignore-arguments)
+                  &key (abi *abi-x86-64*) (linkage 'llvm-sys:internal-linkage))
   #+(or)
   (let ((uninitialized (check-for-uninitialized-inputs-dumb initial-instruction)))
     (unless (null uninitialized)
       (error "Uninitialized inputs: ~a" uninitialized)))
   (let* ((*basic-blocks* (cleavir-basic-blocks:basic-blocks initial-instruction))
          (*tags* (make-hash-table :test #'eq))
-         (*vars* (make-hash-table :test #'eq))
+         (*datum-variables* (make-hash-table :test #'eq))
+         (*datum-allocas* (make-hash-table :test #'eq))
          (*compiled-enters* (make-hash-table :test #'eq))
          (*instruction-go-indices* go-indices)
          (*map-enter-to-function-info* map-enter-to-function-info)
@@ -429,7 +413,7 @@ when this is t a lot of graphs will be generated.")
          (lambda-name (get-or-create-lambda-name initial-instruction)))
     (cc-dbg-when *debug-log* (log-translate initial-instruction))
     (let ((function
-            (memoized-layout-procedure initial-instruction lambda-name abi :linkage linkage :ignore-arguments ignore-arguments)))
+            (memoized-layout-procedure initial-instruction lambda-name abi :linkage linkage)))
       (cmp::cmp-log-compile-file-dump-module cmp:*the-module* "after-translate")
       (setf *ct-translate* (compiler-timer-elapsed))
       (values function lambda-name))))
@@ -456,7 +440,52 @@ when this is t a lot of graphs will be generated.")
               for count-class in sorted-instr-count-list
               when count-class
                 do (sys:monitor-message "instr-miss-origin-class-count ~a ~a" (car count-class) (cdr count-class)))))))
-    
+
+;;; testy
+
+(defvar *replacement-cache*)
+(defvar *assignments-to-delete*)
+;;; given a replacement, return a location that all of its uses can
+;;; use instead. that may be the location itself if there is no replacement.
+(defun replacement (location)
+  (or (gethash location *replacement-cache*)
+      (setf (gethash location *replacement-cache*)
+            (compute-replacement location))))
+
+(defun compute-replacement (location)
+  (if (and (typep location 'cleavir-ir:lexical-location) (ssablep location))
+      (let ((def (first (cleavir-ir:defining-instructions location))))
+        (if (typep def 'cleavir-ir:assignment-instruction)
+            ;; okay, it's a temp; now, is it necessary?
+            (let ((pre (first (cleavir-ir:inputs def))))
+              (if (ssablep pre)
+                  ;; no - get a replacement by recursion,
+                  ;; and mark the assignment for deletion
+                  (progn (push def *assignments-to-delete*)
+                         (replacement pre))
+                  ;; yes
+                  location))
+            location))
+      location))
+
+#+(or)
+(defun replace-alias (location replacement)
+  (loop for user in (cleavir-ir:using-instructions location)
+        do (cleavir-ir:substitute-input replacement location user)))
+
+(defun replace-aliases (initial-instruction)
+  (let ((*replacement-cache* (make-hash-table :test #'eq))
+        (*assignments-to-delete* nil))
+    (cleavir-ir:map-instructions-arbitrary-order
+     (lambda (i)
+       (setf (cleavir-ir:dynamic-environment i)
+             (replacement (cleavir-ir:dynamic-environment i)))
+       (setf (cleavir-ir:inputs i)
+             (mapcar #'replacement (cleavir-ir:inputs i))))
+     initial-instruction)
+    ;; now delete assignments with unused outputs
+    (mapc #'cleavir-ir:delete-instruction *assignments-to-delete*)))
+
 (defun my-hir-transformations (init-instr system env)
   ;; FIXME: Per Cleavir rules, we shouldn't need the environment at this point.
   ;; We do anyway because of the possibility that a load-time-value input is introduced
@@ -508,6 +537,8 @@ when this is t a lot of graphs will be generated.")
   (quick-draw-hir init-instr "hir-after-eliminate-load-time-value-inputs")
   (setf *ct-eliminate-load-time-value-inputs* (compiler-timer-elapsed))
   #+debug-monitor(monitor-instructions-with-origins init-instr)
+
+  #+(or)(replace-aliases init-instr)
   #+(or)
   (cleavir-remove-useless-instructions:remove-useless-instructions init-instr)
   #+(or)
@@ -571,7 +602,17 @@ COMPILE-FILE will use the default *clasp-env*."
          (lambda (condition)
            (cmp:register-global-function-ref (cleavir-environment:name condition))
            (invoke-restart 'cleavir-cst-to-ast:consider-global)))
-       (cleavir-cst-to-ast:compilation-program-error #'conversion-error-handler))
+       (cleavir-cst-to-ast:compiler-macro-expansion-error
+         (lambda (condition)
+           (warn 'cmp:compiler-macro-expansion-error-warning
+                 :origin (origin-spi (cst:source (cleavir-cst-to-ast:cst condition)))
+                 :condition condition)
+           (continue condition)))
+       ((and cleavir-cst-to-ast:compilation-program-error
+             ;; If something goes wrong evaluating an eval-when, we just want a normal error
+             ;; signal- we can't recover and keep compiling.
+             (not cleavir-cst-to-ast:eval-error))
+         #'conversion-error-handler))
     (let ((ast (cleavir-cst-to-ast:cst-to-ast cst env *clasp-system* dynenv)))
       (when *interactive-debug* (draw-ast ast))
       (cc-dbg-when *debug-log* (log-cst-to-ast ast))
@@ -659,20 +700,19 @@ and go-indices as third."
 
 ;;; Convenience. AST must have been hoisted already.
 (defun translate-hoisted-ast (ast &key (abi *abi-x86-64*) (linkage 'llvm-sys:internal-linkage)
-                            (env *clasp-env*) ignore-arguments)
+                            (env *clasp-env*))
   (let ((hir (ast->hir ast)))
     (multiple-value-bind (mir function-info-map go-indices)
         (hir->mir hir env)
       (translate mir function-info-map go-indices
-                 :abi abi :linkage linkage :ignore-arguments ignore-arguments))))
+                 :abi abi :linkage linkage))))
 
 
 (defun translate-ast (ast dynenv &key (abi *abi-x86-64*) (linkage 'llvm-sys:internal-linkage)
-                                   (env *clasp-env*) ignore-arguments)
+                                   (env *clasp-env*))
   (let ((hoisted-ast (hoist-ast ast dynenv env)))
     (translate-hoisted-ast hoisted-ast
-                           :abi abi :linkage linkage :env env
-                           :ignore-arguments ignore-arguments)))
+                           :abi abi :linkage linkage :env env)))
 
 (defun translate-lambda-expression-to-llvm-function (lambda-expression)
   "Compile a lambda expression into an llvm-function and return it.
@@ -708,6 +748,8 @@ This works like compile-lambda-function in bclasp."
 (defvar *cleavir-compile-verbose* nil)
 (export '*cleavir-compile-verbose*)
 (defun cclasp-compile* (form env pathname &key (linkage 'llvm-sys:internal-linkage))
+  (when core:*debug-startup*
+    (core:monitor-write (core:bformat nil "startup cclasp-compile* form: %s%N" form)))
   (when *cleavir-compile-verbose*
     (format *trace-output* "Cleavir compiling t1expr: ~s~%" form)
     (format *trace-output* "          in environment: ~s~%" env ))
@@ -715,7 +757,6 @@ This works like compile-lambda-function in bclasp."
   (let* (function lambda-name
          ordered-raw-constants-list constants-table startup-fn shutdown-fn
          (cleavir-generate-ast:*compiler* 'cl:compile)
-         (*llvm-metadata* (make-hash-table :test 'eql))
          (dynenv (make-dynenv env))
          #+cst
          (cst (cst:cst-from-expression form))
@@ -777,21 +818,51 @@ This works like compile-lambda-function in bclasp."
 
 (defclass clasp-cst-client (eclector.concrete-syntax-tree:cst-client) ())
 
-(defvar *cst-client* (make-instance 'clasp-cst-client))
+;; singleton- don't bother with constructor
+(defvar *cst-client*
+  (locally (declare (notinline make-instance)) (make-instance 'clasp-cst-client)))
 
 (defmethod eclector.parse-result:source-position
     ((client clasp-cst-client) stream)
-  (core:input-stream-source-pos-info stream))
+  (cmp:compile-file-source-pos-info stream))
 
 (defparameter *additional-clasp-character-names*
   (alexandria:alist-hash-table '(("NULL"   . #.(code-char 0))
                                  ("NUL"    . #.(code-char 0))
+                                 ("SOH"    . #.(code-char 1))
+                                 ("STX"    . #.(code-char 2))
+                                 ("ETX"    . #.(code-char 3))
+                                 ("EOT"    . #.(code-char 4))
+                                 ("ENQ"    . #.(code-char 5))
+                                 ("ACK"    . #.(code-char 6))
                                  ("BELL"   . #.(code-char 7))
                                  ("BEL"    . #.(code-char 7))
+                                 ("BS"     . #.(code-char 8))
+                                 ("HT"     . #.(code-char 9))
+                                 ("LF"     . #.(code-char 10)) 
                                  ("VT"     . #.(code-char 11))
+                                 ("FF"     . #.(code-char 12))
                                  ("CR"     . #.(code-char 13))
+                                 ("SO"     . #.(code-char 14))
+                                 ("SI"     . #.(code-char 15))
+                                 ("DLE"    . #.(code-char 16))
+                                 ("DC1"    . #.(code-char 17))
+                                 ("DC2"    . #.(code-char 18))
+                                 ("DC3"    . #.(code-char 19))
+                                 ("DC4"    . #.(code-char 20))
+                                 ("NAK"    . #.(code-char 21))
+                                 ("SYN"    . #.(code-char 22))
+                                 ("ETB"    . #.(code-char 23))
+                                 ("CAN"    . #.(code-char 24))
+                                 ("EM"     . #.(code-char 25))
                                  ("SUB"    . #.(code-char 26))
                                  ("ESCAPE" . #.(code-char 27))
+                                 ("ESC"    . #.(code-char 27))
+                                 ("FS"     . #.(code-char 28))
+                                 ("GS"     . #.(code-char 29))
+                                 ("RS"     . #.(code-char 30))
+                                 ("US"     . #.(code-char 31))
+                                 ("SP"     . #.(code-char 32))
                                  ("DEL"    . #.(code-char 127)))
                                :test 'equal))
 
@@ -815,14 +886,13 @@ This works like compile-lambda-function in bclasp."
 (defun cclasp-loop-read-and-compile-file-forms (source-sin environment)
   (let ((eof-value (gensym))
         (eclector.reader:*client* *cst-client*)
-        (*llvm-metadata* (make-hash-table :test 'eql))
         (cleavir-generate-ast:*compiler* 'cl:compile-file)
         (core:*use-cleavir-compiler* t))
     (loop
       ;; Required to update the source pos info. FIXME!?
       (peek-char t source-sin nil)
       ;; FIXME: if :environment is provided we should probably use a different read somehow
-      (let* ((core:*current-source-pos-info* (core:input-stream-source-pos-info source-sin))
+      (let* ((core:*current-source-pos-info* (cmp:compile-file-source-pos-info source-sin))
              #+cst
              (cst (eclector.concrete-syntax-tree:cst-read source-sin nil eof-value))
              #-cst

@@ -79,14 +79,6 @@ extern core::Symbol_sp& _sym_name;
 #define SIMPLE_ERROR_BF(_str_) SIMPLE_ERROR(BF(_str_))
 
 /*! Error for when an index is out of range - eg: beyond the end of a string */
-#define OLD_TYPE_ERROR_INDEX(_seq_, _idx_) \
-  ERROR(cl::_sym_simpleTypeError, \
-        core::lisp_createList(kw::_sym_format_control, core::lisp_createStr("~S is not a valid index into the object ~S"), \
-                              kw::_sym_format_arguments, core::lisp_createList(clasp_make_fixnum(_idx_), _seq_), \
-                              kw::_sym_expected_type, core::lisp_createList(cl::_sym_integer, clasp_make_fixnum(0), make_fixnum((gc::IsA<Instance_sp>(_seq_) ? gc::As<Instance_sp>(_seq_)->numberOfSlots() : (_seq_)->length()) - 1)), \
-                              kw::_sym_datum, clasp_make_fixnum(_idx_)));
-
-/*! Error for when an index is out of range - eg: beyond the end of a string */
 #define TYPE_ERROR_INDEX(_seq_, _idx_) \
   ERROR(cl::_sym_simpleTypeError, \
         core::lisp_createList(kw::_sym_format_control, core::lisp_createStr("~S is not a valid index into the object ~S"), \
@@ -140,8 +132,6 @@ extern core::Symbol_sp& _sym_name;
 
 #define FILE_ERROR(_file_) ERROR(cl::_sym_fileError, core::lisp_createList(kw::_sym_pathname, _file_))
 #define CANNOT_OPEN_FILE_ERROR(_file_) FILE_ERROR(_file_)
-#define TOO_FEW_ARGUMENTS_ERROR() NO_INITIALIZERS_ERROR(core::_sym_tooFewArgumentsError)
-//#define TOO_MANY_ARGUMENTS_ERROR() NO_INITIALIZERS_ERROR(core::_sym_tooManyArgumentsError)
 #define UNRECOGNIZED_KEYWORD_ARGUMENTS_ERROR(obj) ERROR(core::_sym_unrecognizedKeywordArgumentsError,obj)
 // the following class does not exist in conditions.lsp and is not used
 // #define INVALID_KEYWORD_ARGUMENT_ERROR(obj) ERROR(core::_sym_invalidKeywordArgumentError, obj)
@@ -220,38 +210,36 @@ public:
   int getExitResult() { return this->_ExitResult; };
 };
 
-#if 1
 #pragma GCC visibility push(default)
 class ATTR_WEAK CatchThrow {
   virtual void keyFunctionForVtable() ATTR_WEAK;
 
 private:
-  int _Frame;
+  T_sp _Tag;
 
 public:
-  CatchThrow(int frame) : _Frame(frame){};
-  int getFrame() { return this->_Frame; };
+  CatchThrow(T_sp tag) : _Tag(tag){};
+  T_sp getTag() { return this->_Tag; };
   /*ATTR_WEAK*/ virtual ~CatchThrow(){};
 };
-#else
-#pragma GCC visibility push(default)
-class ATTR_WEAK CatchThrow {
-  virtual void keyFunctionForVtable() ATTR_WEAK;
 
-private:
-  T_sp _ThrownTag;
-  T_mv _ReturnedObject;
+/* Macros for implementing CL:CATCH, like ECL_CATCH_BEGIN.
+ * res is a T_mv variable the results of a throw will be stored in;
+ * for the normal return you have to do that manually. */
+// Use destructors to keep the list of valid catch tags correct.
+#define CLASP_BEGIN_CATCH(tg) {               \
+    CatchTagPusher tags_dummy(my_thread, tg); \
+    try
+#define CLASP_END_CATCH(tg, res)                               \
+  catch (CatchThrow &catchThrow) {                             \
+    if (catchThrow.getTag() != tg)                             \
+      throw catchThrow;                                        \
+    else {                                                     \
+      res = gctools::multiple_values<T_O>::createFromValues(); \
+    }                                                          \
+  }}
 
-public:
-  CatchThrow(T_sp thrownTag, T_mv ret) {
-    this->_ThrownTag = thrownTag;
-    this->_ReturnedObject = ret;
-  }
-  ~T_sp getThrownTag() { return this->_ThrownTag; };
-  T_mv getReturnedObject() { return this->_ReturnedObject; };
-  /*ATTR_WEAK*/ virtual ~CatchThrow(){};
-};
-#endif
+[[noreturn]] void clasp_throw(T_sp);
 
 class ATTR_WEAK ReturnFrom //: public gctools::HeapRoot
     {
@@ -264,26 +252,6 @@ public:
   }
   T_O* getHandle() const { return this->_Handle; };
   /*ATTR_WEAK*/ virtual ~ReturnFrom(){};
-};
-
-/*! Thrown by slot_ref when a slot_ref call fails because the symbol_name is invalid */
-
-class SlotRefFailed {
-};
-
-
-class ATTR_WEAK LexicalGo {
-  virtual void keyFunctionForVtable() ATTR_WEAK;
-
-private:
-  T_O* _Handle;
-  int _Index;
-
-public:
-  ATTR_WEAK LexicalGo(T_O* handle, int index) : _Handle(handle), _Index(index){};
-  T_O* getHandle() const { return this->_Handle; };
-  int index() const { return this->_Index; };
-  /*ATTR_WEAK*/ virtual ~LexicalGo(){};
 };
 
 class ATTR_WEAK DynamicGo //: public gctools::HeapRoot
@@ -314,40 +282,15 @@ public:
   size_t index() const { return this->_Index; };
 };
 
-struct TooManyArgumentsError {
-  int givenNumberOfArguments;
-  int requiredNumberOfArguments;
-  TooManyArgumentsError(int given, int required);
-};
-
-class TooFewArgumentsError {
-private:
-  TooFewArgumentsError();
-
-public:
-  int givenNumberOfArguments;
-  int requiredNumberOfArguments;
-  TooFewArgumentsError(int given, int required);
-};
-
-struct UnrecognizedKeywordArgumentError {
-  core::T_sp argument;
-  UnrecognizedKeywordArgumentError(core::T_sp arg) : argument(arg){};
-};
-
 #pragma GCC visibility pop
 
-void throwTooFewArgumentsError(size_t given, size_t required);
+void throwTooFewArgumentsError(core::T_sp closure,size_t given, size_t required);
 
-void throwTooManyArgumentsError(size_t given, size_t required);
+void throwTooManyArgumentsError(core::T_sp closure, size_t given, size_t required);
 
-void throwUnrecognizedKeywordArgumentError(T_sp kw);
+void throwUnrecognizedKeywordArgumentError(core::T_sp closure, T_sp kw);
 
-void wrongNumberOfArguments(size_t givenNumberOfArguments, size_t requiredNumberOfArguments);
-
-/*! Used by the debugger to resume the read-eval-print-loop */
-class ResumeREPL {
-};
+void wrongNumberOfArguments(core::T_sp closure, size_t givenNumberOfArguments, size_t requiredNumberOfArguments);
 
 /*! Set a break-point in _trapThrow to catch
          * every exception except those thrown by THROW_noTrap
@@ -488,35 +431,6 @@ public:
 extern void debugLogProcessRank(int rank);
 extern void debugBreakPoint();
 
-#define EXCEPTION_ATOM_NOT_FOUND 1
-#define EXCEPTION_FRAGMENT_NOT_FOUND 2
-#define EXCEPTION_LOOP_OVER_NULL 3
-#define EXCEPTION_CONTENT_NOT_FOUND 4
-#define EXCEPTION_255_TYPES_ALLOWED_MAX 5
-#define EXCEPTION_BOND_NOT_FOUND 6
-#define EXCEPTION_ANGLE_NOT_FOUND 7
-#define EXCEPTION_TORSION_NOT_FOUND 8
-#define EXCEPTION_TYPE_NOT_FOUND 9
-#define EXCEPTION_NONBOND_NOT_FOUND 10
-#define EXCEPTION_FILE_ERROR 11
-#define EXCEPTION_ZERO_VECTOR_CANNOT_BE_NORMALIZED 12
-#define EXCEPTION_ILLEGAL_LOOP 13
-#define EXCEPTION_DKP_NOT_FOUND 14
-#define EXCEPTION_INVALID_MOE_HEADER 15
-#define EXCEPTION_UNKNOWN_MOE_TYPE 16
-#define EXCEPTION_UNKNOWN_MOE_ATOM_TYPE 17
-
-typedef struct {
-  int exception;
-  char message[500];
-} Exception;
-
-#define NOT_DONE_YET() \
-  { printf("\n\n\n%s:%d FUNCTION NOT DONE YET!!!!\n\n\n\n", __FILE__, __LINE__); };
-
-#define EXCEPTION_ID(e) (e.exception)
-#define EXCEPTION_MESSAGE(e) (e.message)
-
 void debugSuppressMessages(bool s);
 /*! Write to the debug log file without any translation of special
  *   XML characters
@@ -538,7 +452,6 @@ extern bool stackmap_log;
 
 #ifdef DEBUG_ON
 //#error "TURN OFF DEBUG_ON"
-#define TESTMEMORY()
 
 #define HARD_BREAK_POINT() __asm int 3;
 #define lisp_LOG(___fmt)                                                     \
@@ -558,7 +471,6 @@ extern bool stackmap_log;
 #define SHOUT(___fmt) lisp_SHOUT(___fmt)
 
 #else //DEBUG_ON
-#define TESTMEMORY()
 #define HARD_BREAK_POINT() \
   {}
 #define LOG(___fmt) \
@@ -574,6 +486,7 @@ extern bool stackmap_log;
 
 
  void assert_failure(const char* file, size_t line, const char* func, const char* msg);
+void assert_failure_bounds_error_lt(const char* file, size_t line, const char* func, int64_t x, int64_t y);
  
 #ifdef DEBUG_ASSERT
 #define lisp_ASSERT(x) if (!(x)) ::core::assert_failure(__FILE__,__LINE__,__FUNCTION__,#x)
@@ -582,8 +495,10 @@ extern bool stackmap_log;
 #ifdef DEBUG_BOUNDS_ASSERT
 #define lisp_BOUNDS_ASSERT(x) if (!(x)) ::core::assert_failure(__FILE__,__LINE__,__FUNCTION__,#x)
 #define BOUNDS_ASSERT(x) lisp_BOUNDS_ASSERT(x)
+#define BOUNDS_ASSERT_LT(x,y) {if (!((x)<(y))) ::core::assert_failure_bounds_error_lt(__FILE__,__LINE__,__FUNCTION__,x,y);}
  #else
 #define BOUNDS_ASSERT(x)
+#define BOUNDS_ASSERT_LT(x,y)
 #endif
 #ifdef DEBUG_ASSERT
 #define lisp_ASSERTP( x, e) if (!(x)) ::core::assert_failure(__FILE__,__LINE__,__FUNCTION__,(e));
@@ -661,13 +576,6 @@ extern bool stackmap_log;
   {}
 #endif
 
-extern void _stackTraceEnter(uint debugFlags);
-extern void _stackTraceLineNumberAndColumnUpdate(uint ln, uint col);
-extern void _stackTraceExit();
-extern void _stackTraceDump();
-extern void _stackTraceTakeSnapshot();
-extern string _stackTraceAsString();
-
 //
 // Define the _lisp variable but don't create a debugging stack frame
 //
@@ -741,15 +649,13 @@ void core__wrong_index(const string &sourceFile, int lineno, Symbol_sp function,
 void core__reader_error_internal(const string &sourceFile, uint lineno,
                     String_sp fmt, List_sp fmtargs, T_sp stream = _Nil<T_O>());
 
-void assert_type_integer(T_sp p, int idx);
-
 T_sp core__signal_simple_error(T_sp baseCondition, T_sp continueMessage, T_sp formatControl, T_sp formatArgs, T_sp args);
 
 [[noreturn]] void FEerror(const string &fmt, int numArgs, ...);
 void FEtype_error_list(T_sp thing);
 void FElibc_error(const char *fmt, int nargs, ...);
 void FEcannot_open(T_sp fn);
- void FEargument_number_error(T_sp supplied, T_sp min, T_sp max);
+void FEargument_number_error(T_sp supplied, T_sp min, T_sp max);
 T_sp CEerror(T_sp c, const char *fmt, int numArgs, ...);
 
 void FEpackage_error(const char *fmt, T_sp package, int nargs, ...);

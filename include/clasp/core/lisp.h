@@ -174,43 +174,11 @@ public:
   virtual void expose(core::Lisp_sp lisp, WhatToExpose what) const = 0;
 };
 
-// THESE NEED TO BE DEFINED WHERE THEY ARE USED
-//
-//#define EXTERN_SYMBOL(__sym) extern core::Symbol_sp __sym;
-//#define	STATIC_SYMBOL(__sym) core::Symbol_sp __sym = UNDEFINED_SYMBOL;
-
-//#define	DEFINE_FIRST_SYMBOL_FOR_PACKAGE(pkgName) {}
-//#define CREATE_SYMBOL(sidsym,rsid,pkg,name) sidsym = _lisp->internWithPackageName(pkg,name);
-#define DEFAULT_LOOKUP_SYMBOL(pkg, name) _lisp->internUniqueWithPackageName(pkg, name)
-
-#define FLAG_Continue 1
-#define FLAG_Break 2
-#define FLAG_Return 4
-#define FLAG_Exit 8
-
-typedef T_sp (*PrimFuncPtr)(List_sp, Lisp_sp);
-
 template <typename oclass>
 class class_;
 
-/*! Interpreter/compiler modes  see Lisp_O::_Mode
-  See ecl::compiler.d
-*/
-#define FLAG_LOAD 0x01
-#define FLAG_COMPILE 0x02
-#define FLAG_EXECUTE 0x04
-#define FLAG_ONLY_LOAD 0x08
-
-class PushLispMode;
-
- #if 0
-struct ThreadInfo {
-  MultipleValues multipleValues;
-};
-#endif
- 
 class Lisp_O {
-  friend T_mv core__source_file_info(T_sp sourceFile, String_sp truename, size_t offset, bool useLineno);
+  friend T_mv core__file_scope(T_sp sourceFile);
   friend gctools::Layout_code* gctools::get_stamp_layout_codes();
   struct GCRoots //: public gctools::HeapRoot
   {
@@ -237,13 +205,13 @@ class Lisp_O {
     HashTable_sp _ClassTable;
     Integer_sp _IntegerOverflowAdjust;
     CharacterInfo charInfo;
-    gctools::Vec0<core::Symbol_sp> _ClassSymbolsHolder;
-    gctools::Vec0<Instance_sp> staticClasses;
-    gctools::Vec0<Symbol_sp> staticClassSymbols;
-    gctools::Vec0<Creator_sp> staticInstanceCreators;
+    gctools::Vec0<core::Symbol_sp> _ClassSymbolsHolderUnshiftedNowhere;
+    gctools::Vec0<Instance_sp> staticClassesUnshiftedNowhere;
+    gctools::Vec0<Symbol_sp> staticClassSymbolsUnshiftedNowhere;
+    gctools::Vec0<Creator_sp> staticInstanceCreatorsUnshiftedNowhere;
 //    DynamicBindingStack _Bindings;
-    gctools::Vec0<SourceFileInfo_sp> _SourceFiles;
-    map<string, int> _SourceFileIndices; // map<string,SourceFileInfo_sp> 	_SourceFiles;
+    gctools::Vec0<FileScope_sp> _SourceFiles;
+    map<string, int> _SourceFileIndices; // map<string,FileScope_sp> 	_SourceFiles;
 #ifdef CLASP_THREADS
     //! Protect _SourceFiles
     mutable mp::SharedMutex _SourceFilesMutex;
@@ -294,11 +262,9 @@ class Lisp_O {
     mutable mp::SharedMutex _SingleDispatchGenericFunctionHashTableEqualMutex;
 #endif
 
-#ifdef DEBUG_MONITOR
-#ifdef CLASP_THREADS
-    mutable mp::Mutex _LogMutex;
-#endif
-    std::ofstream _LogStream;
+#ifdef DEBUG_MONITOR_SUPPORT
+    mutable mp::SharedMutex _MonitorMutex;
+    std::ofstream _MonitorStream;
 #endif
     
     /*! True object */
@@ -334,7 +300,6 @@ class Lisp_O {
 
   friend class IncrementTraceLevel;
   friend class MultipleValues;
-  friend class PushLispMode;
   friend class CoreExposer;
   friend class ConditionHandlerManager;
   friend class BootStrapCoreSymbolMap;
@@ -390,8 +355,7 @@ public:
   List_sp copy_default_special_bindings() const;
 #endif
 public:
-  /*! Map source file path strings to SourceFileInfo_sp */
-  uint _Mode;
+  /*! Map source file path strings to FileScope_sp */
   uint _ReplCounter;
   /*! Store paths to important directories */
   Bundle *_Bundle;
@@ -435,8 +399,6 @@ public:
   // ------------------------------------------------------------
   // ------------------------------------------------------------
   // ------------------------------------------------------------
-public:
-//  InvocationHistoryStack &invocationHistoryStack();
 
 public:
   /*! Signal a problem if the stack gets too full*/
@@ -453,9 +415,6 @@ public:
   DebugStream &debugLog() {
     return *(this->_DebugStream);
   };
-  //	vector<string>& printfPrefixStack() { return this->_printfPrefixStack;};
-public:
-//  inline ExceptionStack &exceptionStack() { return this->_Roots._ExceptionStack; };
 
 public:
   uint nextReplCounter() { return ++this->_ReplCounter; };
@@ -495,10 +454,10 @@ public:
   CharacterInfo &characterInfo() { return this->_Roots.charInfo; };
 
 public:
-  gctools::Vec0<core::Symbol_sp> &classSymbolsHolder() { return this->_Roots._ClassSymbolsHolder; };
+  gctools::Vec0<core::Symbol_sp> &classSymbolsHolder() { return this->_Roots._ClassSymbolsHolderUnshiftedNowhere; };
 
 public:
-  SourceFileInfo_mv getOrRegisterSourceFileInfo(const string &fileName, T_sp truename = _Nil<T_O>(), size_t offset = 0, bool useLineno = true);
+  FileScope_mv getOrRegisterFileScope(const string &fileName);
 
 public:
   /*! Get the LoadTimeValues_sp that corresponds to the name.
@@ -512,9 +471,9 @@ public:
 
 public:
   /*! Keep track of every source file that is read by the system */
-  //	SourceFileInfo_sp getSourceFileInfo(const string& fileName);
+  //	FileScope_sp getSourceFileInfo(const string& fileName);
   /*! Maintain a database of every source file read by the system */
-  void setSourceFileInfo(const string &fileName, SourceFileInfo_sp fileInfo);
+  void setFileScope(const string &fileName, FileScope_sp fileInfo);
 
 public:
   /*! Takes the place of ECL trap_fpe_bits - for now trap everything */
@@ -548,9 +507,6 @@ public:
 public:
   /*! Setup makePackage and exportSymbol callbacks */
   void setMakePackageAndExportSymbolCallbacks(MakePackageCallback mpc, ExportSymbolCallback esc);
-
-public:
-  uint mode() const { return this->_Mode; };
 
 public:
   bool isSingleStepOn() { return this->_SingleStepLevel != UndefinedUnsignedInt; };
@@ -972,21 +928,6 @@ struct SafeBufferStr8Ns {
   StrWNs_sp string() const {return this->_Buffer;};
 };
 
-
- 
-/*! Scoped change of lisp mode */
-class PushLispMode {
-private:
-  uint _OldMode;
-
-public:
-  PushLispMode(uint newMode) {
-    this->_OldMode = _lisp->_Mode;
-    _lisp->_Mode = newMode;
-  };
-  virtual ~PushLispMode() { _lisp->_Mode = this->_OldMode; };
-};
-
 void initializeLisp();
 
 class LispHolder //: public gctools::StackRoot
@@ -1033,9 +974,14 @@ namespace core {
 
 namespace core {
   void initialize_Lisp_O();
+#ifdef DEBUG_MONITOR_SUPPORT
+std::string core__monitor_directory();
+FILE* monitor_file(const std::string& filename_prefix);
+#endif
+
 #ifdef DEBUG_MONITOR
   void monitor_message(const std::string& msg);
-#define MONITOR(x) monitor_message((x).str());
+#define MONITOR(x) core::monitor_message((x).str());
 #else
 #define MONITOR(x)
 #endif

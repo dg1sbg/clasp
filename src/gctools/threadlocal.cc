@@ -205,11 +205,11 @@ ThreadLocalStateLowLevel::~ThreadLocalStateLowLevel()
 };
 namespace core {
 
-
 ThreadLocalState::ThreadLocalState() :
   _stackmap(0),
   _stackmap_size(0),
-_PendingInterrupts(_Nil<core::T_O>())
+  _PendingInterrupts(_Nil<core::T_O>()),
+  _CatchTags(_Nil<core::T_O>())
 #ifdef DEBUG_RECURSIVE_ALLOCATIONS
   , _RecursiveAllocationCounter(0)
 #endif
@@ -243,37 +243,32 @@ void ThreadLocalState::initialize_thread(mp::Process_sp process, bool initialize
   this->_Process = process;
   process->_ThreadInfo = this;
   this->_BFormatStringOutputStream = gc::As<StringOutputStream_sp>(clasp_make_string_output_stream());
-  this->_WriteToStringOutputStream = gc::As<StringOutputStream_sp>(clasp_make_string_output_stream());
+#ifdef CLASP_UNICODE
+  this->_WriteToStringOutputStream = gc::As<StringOutputStream_sp>(clasp_make_string_output_stream(STRING_OUTPUT_STREAM_DEFAULT_SIZE,1));
+#else
+   this->_WriteToStringOutputStream = gc::As<StringOutputStream_sp>(clasp_make_string_output_stream());
+#endif
   this->_BignumRegister0 = Bignum_O::create( (gc::Fixnum) 0);
   this->_BignumRegister1 = Bignum_O::create( (gc::Fixnum) 0);
   this->_BignumRegister2 = Bignum_O::create( (gc::Fixnum) 0);
   this->_SingleDispatchMethodCachePtr = gc::GC<Cache_O>::allocate();
   this->_SingleDispatchMethodCachePtr->setup(2, Lisp_O::SingleDispatchMethodCacheSize);
   this->_PendingInterrupts = _Nil<T_O>();
+  this->_CatchTags = _Nil<T_O>();
   this->_SparePendingInterruptRecords = cl__make_list(clasp_make_fixnum(16),_Nil<T_O>());
 };
 
 void ThreadLocalState::create_sigaltstack() {
-#if 0
-  // Set up a sigaltstack
-  stack_t sigstk;
-  size_t size = SIGNAL_STACK_SIZE+SIGSTKSZ;
-  my_thread->_sigaltstack_buffer = (void*)malloc(size);
-  if (!my_thread->_sigaltstack_buffer) perror("Could not allocate signal stack");
-  sigstk.ss_size = SIGNAL_STACK_SIZE+SIGSTKSZ;
-  sigstk.ss_flags = 0;
-  if (sigaltstack(&sigstk,&my_thread->_original_stack) < 0) perror("sigaltstack problem");
-#endif
 }
 
 void ThreadLocalState::destroy_sigaltstack()
 {
-#if 0
-  if (sigaltstack(&my_thread->_original_stack, (stack_t *)0) < 0) perror("sigaltstack problem");
-  free(my_thread->_sigaltstack_buffer);
-#endif
 }
 
+// Push a tag onto the list of active catches.
+void ThreadLocalState::pushCatchTag(T_sp tag) {
+  this->_CatchTags = Cons_O::create(tag, this->_CatchTags);
+}
 
 };
 

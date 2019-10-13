@@ -50,7 +50,7 @@ T_sp load_stream(T_sp strm, bool print) {
     // Required to get source position correct. FIXME
     cl__peek_char(_lisp->_true(), strm, _Nil<T_O>(), _Nil<T_O>(), _Nil<T_O>());
     DynamicScopeManager scope(_sym_STARcurrentSourcePosInfoSTAR,
-                              core__input_stream_source_pos_info(strm));
+                              clasp_simple_input_stream_source_pos_info(strm));
     bool echoReplRead = _sym_STARechoReplReadSTAR->symbolValue().isTrue();
     T_sp x = cl__read(strm, _Nil<T_O>(), _Unbound<T_O>(), _Nil<T_O>());
     if (x.unboundp())
@@ -60,7 +60,7 @@ T_sp load_stream(T_sp strm, bool print) {
     }
     if (x.number_of_values() > 0) {
       if (print)
-        write_bf_stream(BF(";; -read- %s") % _rep_(x));
+        write_bf_stream(BF(";; -read- %s\n") % _rep_(x));
       eval::funcall(core::_sym_STAReval_with_env_hookSTAR->symbolValue(), x, _Nil<T_O>());
     }
   }
@@ -73,20 +73,23 @@ CL_DECLARE();
 CL_DOCSTRING("loadSource");
 CL_DEFUN T_sp core__load_source(T_sp source, bool verbose, bool print, core::T_sp externalFormat) {
   T_sp strm;
-  void *strmPointer;
   if (source.nilp()) {
     SIMPLE_ERROR(BF("%s was called with NIL as the source filename") % __FUNCTION__);
   }
+  T_sp final_format;
+  if (externalFormat.nilp())
+    final_format = kw::_sym_default;
+  else
+    final_format = externalFormat;
   strm = cl__open(source,
                   kw::_sym_input,
                   cl::_sym_character,
                   _Nil<T_O>(), false,
                   _Nil<T_O>(), false,
-                   kw::_sym_default,
+                   final_format,
                   _Nil<T_O>());
   if (strm.nilp())
     return _Nil<T_O>();
-  strmPointer = &(*strm);
   
   DynamicScopeManager scope;
   if (source.nilp()) SIMPLE_ERROR(BF("%s was about to pass nil to pathname") % __FUNCTION__);

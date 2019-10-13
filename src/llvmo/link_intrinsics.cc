@@ -166,19 +166,6 @@ void cc_remove_gcroots_in_module(gctools::GCRootsInModule* holder)
   NO_UNWIND_END();
 }
 
-
-void ltvc_assign_source_file_info_handle(const char *moduleName, const char *sourceDebugPathname, size_t sourceDebugOffset, int useLineno, int *sourceFileInfoHandleP) {
-  NO_UNWIND_BEGIN();
-  //	printf("%s:%d assignSourceFileInfoHandle %s\n", __FILE__, __LINE__, moduleName );
-  core::SimpleBaseString_sp mname = core::SimpleBaseString_O::make(moduleName);
-  core::SimpleBaseString_sp struename = core::SimpleBaseString_O::make(sourceDebugPathname);
-  T_mv sfi_mv = core::core__source_file_info(mname, struename, sourceDebugOffset, useLineno ? true : false);
-  SourceFileInfo_sp sfi = gc::As<SourceFileInfo_sp>(sfi_mv);
-  int sfindex = unbox_fixnum(gc::As<core::Fixnum_sp>(sfi_mv.valueGet_(1)));
-  *sourceFileInfoHandleP = sfindex;
-  NO_UNWIND_END();
-}
-
 // Define what ltvc_xxxx functions return - this must match what is
 //  in cmpintrinsics.lsp
 typedef void LtvcReturn;
@@ -517,7 +504,6 @@ LispCallingConventionPtr lccGlobalFunction(core::Symbol_sp sym) {
 extern "C" {
 
 const std::type_info &typeidCoreCatchThrow = typeid(core::CatchThrow);
-const std::type_info &typeidCoreLexicalGo = typeid(core::LexicalGo);
 const std::type_info &typeidCoreDynamicGo = typeid(core::DynamicGo);
 const std::type_info &typeidCoreReturnFrom = typeid(core::ReturnFrom);
 const std::type_info &typeidCoreUnwind = typeid(core::Unwind);
@@ -571,12 +557,27 @@ void dumpLowLevelTrace(int numLowLevels) {
 
 extern "C" {
 
-NOINLINE void va_tooManyArgumentsException(const char *funcName, std::size_t givenNumberOfArguments, std::size_t requiredNumberOfArguments) {
-  SIMPLE_ERROR(BF("Too many arguments for %s - got %d and expected %d") % funcName % givenNumberOfArguments % requiredNumberOfArguments);
-}
-
-NOINLINE void va_notEnoughArgumentsException(const char *funcName, std::size_t givenNumberOfArguments, std::size_t requiredNumberOfArguments) {
-  SIMPLE_ERROR(BF("Too few arguments for %s - got %d and expected %d") % funcName % givenNumberOfArguments % requiredNumberOfArguments);
+// FIXME: This should be [[noreturn]], but I'm not sure how to communicate to clang that the
+// error calls won't return, so it complains if that's declared.
+NOINLINE void cc_wrong_number_of_arguments(core::T_O* tfunction, std::size_t nargs,
+                                                        std::size_t min, std::size_t max) {
+  Function_sp function((gctools::Tagged)tfunction);
+  /* This is kind of a KLUDGE, but we use a smaller max to indicate there is no
+   * limit on the number of arguments (i.e., &rest or &key).
+   * Check how calls to this function are generated in cmp/arguments.lsp. */
+  if (max < min)
+    core::eval::funcall(cl::_sym_error,
+                        core::_sym_wrongNumberOfArguments,
+                        kw::_sym_calledFunction, function,
+                        kw::_sym_givenNargs, core::make_fixnum(nargs),
+                        kw::_sym_minNargs, core::make_fixnum(min));
+  else
+    core::eval::funcall(cl::_sym_error,
+                        core::_sym_wrongNumberOfArguments,
+                        kw::_sym_calledFunction, function,
+                        kw::_sym_givenNargs, core::make_fixnum(nargs),
+                        kw::_sym_minNargs, core::make_fixnum(min),
+                        kw::_sym_maxNargs, core::make_fixnum(max));
 }
 
 ALWAYS_INLINE T_O *va_lexicalFunction(size_t depth, size_t index, core::T_O* evaluateFrameP)
@@ -649,12 +650,12 @@ void cc_ifBadKeywordArgumentException(core::T_O *allowOtherKeys, core::T_O *kw,
 extern "C" {
 
 
-DONT_OPTIMIZE_WHEN_DEBUG_RELEASE core::T_O* makeCompiledFunction(fnLispCallingConvention funcPtr,
+core::T_O* makeCompiledFunction(fnLispCallingConvention funcPtr,
                                                                  void* functionDescription,
                                                                  core::T_O* frameP
                                                                  )
 {NO_UNWIND_BEGIN();
-  // TODO: If a pointer to an integer was passed here we could write the sourceName SourceFileInfo_sp index into it for source line debugging
+  // TODO: If a pointer to an integer was passed here we could write the sourceName FileScope_sp index into it for source line debugging
   core::T_sp frame((gctools::Tagged)frameP);
   core::ClosureWithSlots_sp toplevel_closure =
     gctools::GC<core::ClosureWithSlots_O>::allocate_container(false, BCLASP_CLOSURE_SLOTS,
@@ -855,7 +856,7 @@ void debugPrint_size_t(size_t v)
   NO_UNWIND_END();
 }
 
-DONT_OPTIMIZE_WHEN_DEBUG_RELEASE void throwReturnFrom(size_t depth, core::ActivationFrame_O* frameP) {
+void throwReturnFrom(size_t depth, core::ActivationFrame_O* frameP) {
 #ifdef DEBUG_TRACK_UNWINDS
   global_ReturnFrom_count++;
 #endif
@@ -871,7 +872,7 @@ DONT_OPTIMIZE_WHEN_DEBUG_RELEASE void throwReturnFrom(size_t depth, core::Activa
 
 extern "C" {
 
-DONT_OPTIMIZE_WHEN_DEBUG_RELEASE gctools::return_type blockHandleReturnFrom_or_rethrow(unsigned char *exceptionP, core::T_O* handle) {
+gctools::return_type blockHandleReturnFrom_or_rethrow(unsigned char *exceptionP, core::T_O* handle) {
   core::ReturnFrom &returnFrom = (core::ReturnFrom &)*((core::ReturnFrom *)(exceptionP));
   if (returnFrom.getHandle() == handle) {
     core::MultipleValues &mv = core::lisp_multipleValues();
@@ -906,7 +907,7 @@ DONT_OPTIMIZE_WHEN_DEBUG_RELEASE gctools::return_type blockHandleReturnFrom_or_r
 
 extern "C" {
 
-DONT_OPTIMIZE_WHEN_DEBUG_RELEASE core::T_O* initializeBlockClosure(core::T_O** afP)
+core::T_O* initializeBlockClosure(core::T_O** afP)
 {NO_UNWIND_BEGIN();
   ValueFrame_sp vf = ValueFrame_sp((gc::Tagged)*reinterpret_cast<ValueFrame_O**>(afP));
 #ifdef DEBUG_FLOW_TRACKER
@@ -935,15 +936,6 @@ core::T_O* initializeTagbodyClosure(core::T_O *afP)
   NO_UNWIND_END();
 }
 };
-
-core::T_mv proto_ifCatchFrameMatchesStoreResultElseRethrow(size_t catchFrame, unsigned char *exceptionP) {
-  core::CatchThrow *ctExceptionP = reinterpret_cast<core::CatchThrow *>(exceptionP);
-  if (catchFrame == ctExceptionP->getFrame()) {
-    return gctools::multiple_values<core::T_O>::createFromValues(); // ctExceptionP->getReturnedObject();
-  }
-// rethrow the exception
-  throw * ctExceptionP;
-}
 
 extern "C" {
 
@@ -978,12 +970,12 @@ size_t tagbodyHandleDynamicGoIndex_or_rethrow(char *exceptionP, T_O* handle) {
 }
 
 
-void debugSourceFileInfoHandle(int *sourceFileInfoHandleP)
+void debugFileScopeHandle(int *sourceFileInfoHandleP)
 {NO_UNWIND_BEGIN();
   int sfindex = *sourceFileInfoHandleP;
   core::Fixnum_sp fn = core::make_fixnum(sfindex);
-  SourceFileInfo_sp sfi = gc::As<SourceFileInfo_sp>(core::core__source_file_info(fn));
-  printf("%s:%d debugSourceFileInfoHandle[%d] --> %s\n", __FILE__, __LINE__, sfindex, _rep_(sfi).c_str());
+  FileScope_sp sfi = gc::As<FileScope_sp>(core::core__file_scope(fn));
+  printf("%s:%d debugFileScopeHandle[%d] --> %s\n", __FILE__, __LINE__, sfindex, _rep_(sfi).c_str());
   NO_UNWIND_END();
 }
 };
@@ -1004,14 +996,6 @@ gctools::return_type restoreFromMultipleValue0()
   NO_UNWIND_END();
 }
 
-size_t cc_trackFirstUnexpectedKeyword(size_t badKwIdx, size_t newBadKwIdx)
-{NO_UNWIND_BEGIN();
-  // 65536 is the magic number for badKwIdx has not been assigned yet
-  if (badKwIdx != 65536)
-    return badKwIdx;
-  return newBadKwIdx;
-  NO_UNWIND_END();
-}
 };
 
 extern "C" {
@@ -1051,10 +1035,6 @@ void setFrameUniqueId(size_t id, core::ActivationFrame_O* frameP) {
 #endif
 }
 
-void ignore_setFrameUniqueId() {
-  // Do nothing
-}
-
 void ensureFrameUniqueId(size_t id, size_t depth, core::ActivationFrame_O* frameP) {
 #ifdef DEBUG_LEXICAL_DEPTH
   ActivationFrame_sp src((gctools::Tagged)frameP);
@@ -1064,10 +1044,6 @@ void ensureFrameUniqueId(size_t id, size_t depth, core::ActivationFrame_O* frame
     abort();
   }
 #endif
-}
-
-void ignore_ensureFrameUniqueId() {
-  // Do nothing
 }
 
 };
@@ -1159,31 +1135,6 @@ void cc_initialize_closure(core::T_O* functoid,
   va_end(argp);
 }
 
-/*! Take the multiple-value inputs from the thread local MultipleValues and call tfunc with them.
-     This function looks exactly like the cc_invoke_multipleValueOneFormCall intrinsic but
-    in cmpintrinsics.lsp it is set not to require a landing pad */
-//    void cc_call_multipleValueOneFormCall(core::T_mv* result, core::T_O* tfunc )
-
-LCC_RETURN cc_call_multipleValueOneFormCall(core::Function_O *tfunc) {
-  ASSERTF(gctools::tagged_generalp(tfunc), BF("The argument %p does not have a general tag!") % (void*)tfunc);
-  core::MultipleValues &mvThreadLocal = core::lisp_multipleValues();
-  size_t lcc_nargs = mvThreadLocal.getSize();
-  MAKE_STACK_FRAME( mvargs, tfunc, lcc_nargs);
-  for (size_t i(0); i < lcc_nargs; ++i) (*mvargs)[i] = ENSURE_VALID_OBJECT(mvThreadLocal[i]);
-#ifdef DEBUG_VALUES
-  if (_sym_STARdebug_valuesSTAR &&
-        _sym_STARdebug_valuesSTAR->boundP() &&
-        _sym_STARdebug_valuesSTAR->symbolValue().notnilp()) {
-    for (size_t i(0); i < lcc_nargs; ++i) {
-      core::T_sp mvobj((gctools::Tagged)(*mvargs)[i]);
-      printf("%s:%d  ....  cc_call_multipleValueOneFormCall[%lu] -> %s\n", __FILE__, __LINE__, i, _rep_(mvobj).c_str());
-    }
-  }
-#endif
-  core::Function_sp func((gctools::Tagged)tfunc);
-  return core::funcall_frame(func,mvargs);
-}
-
 LCC_RETURN cc_call_multipleValueOneFormCallWithRet0(core::Function_O *tfunc, gctools::return_type ret0 ) {
   ASSERTF(gctools::tagged_generalp(tfunc), BF("The argument %p does not have a general tag!") % (void*)tfunc);
   MAKE_STACK_FRAME( mvargs, tfunc, ret0.nvals);
@@ -1224,19 +1175,28 @@ void cc_unwind(T_O *targetFrame, size_t index) {
 #ifdef DEBUG_TRACK_UNWINDS
   global_unwind_count++;
 #endif
+  // Signal an error if the frame we're trying to return to is no longer on the stack.
+  // FIXME: This is kind of a kludge. It iterates through the stack frame. But c++ throw
+  // does so as well - twice - so we end up iterating three times.
+  // The correct thing to do would probably be to use the Itanium EH ABI (which we already
+  // rely on the C++ part of) and write our own throw, that signals an error instead of
+  // calling std::terminate in the event no handler is present.
+  core::frame_check((uintptr_t)targetFrame);
   core::Unwind unwind(targetFrame, index);
-    throw unwind;
+  throw unwind;
 }
 
-void cc_saveMultipleValue0(core::T_mv *result)
+void cc_saveMultipleValue0(core::T_mv result)
 {NO_UNWIND_BEGIN();
-  (*result).saveToMultipleValue0();
+  result.saveToMultipleValue0();
   NO_UNWIND_END();
 }
 
-void cc_restoreMultipleValue0(core::T_mv *result)
+gctools::return_type cc_restoreMultipleValue0()
 {NO_UNWIND_BEGIN();
-  (*result).readFromMultipleValue0();
+  MultipleValues &mv = lisp_multipleValues();
+  size_t nret = mv.getSize();
+  return gctools::return_type((nret == 0) ? _Nil<T_O>().raw_() : mv[0], nret);
   NO_UNWIND_END();
 }
 
@@ -1264,7 +1224,6 @@ T_O *cc_pushLandingPadFrame()
 }
 
 size_t cc_landingpadUnwindMatchFrameElseRethrow(char *exceptionP, core::T_O *thisFrame) {
-  ASSERT(gctools::tagged_fixnump(thisFrame));
   core::Unwind *unwindP = reinterpret_cast<core::Unwind *>(exceptionP);
   if (unwindP->getFrame() == thisFrame) {
     return unwindP->index();
@@ -1273,11 +1232,6 @@ size_t cc_landingpadUnwindMatchFrameElseRethrow(char *exceptionP, core::T_O *thi
   throw;
 }
 
-void clasp_terminate()
-{
-  printf("Terminating clasp from clasp_terminate\n");
-  abort();
-}
 };
 
 #pragma GCC visibility pop

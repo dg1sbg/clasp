@@ -37,7 +37,6 @@ namespace core {
   class Closure_O;
   class Creator_O;
   class Iterator_O;
-  class SequenceStepper_O;
 };
 namespace asttooling {
 namespace internal {
@@ -78,12 +77,8 @@ namespace asttooling {
 
 ////////////////////////////////////////////////////////////
 //
-
-extern Fixnum global_TheClassRep_stamp;
-
-////////////////////////////////////////////////////////////
-//
 // Forward definition for classes
+//
 #ifdef BUILD_EXTENSION
 #define GC_INTERFACE_FORWARD
 #include <project_headers.h>
@@ -130,8 +125,6 @@ namespace gctools {
 #endif
 };
 
-#include <clasp/gctools/other_tagged_casts.h>
-
 extern "C" {
 const char *obj_name(gctools::stamp_t kind);
 extern void obj_dump_base(void *base);
@@ -156,8 +149,8 @@ void initialize_classes_and_methods();
 void initialize_typeq_map();
 
 
-extern std::map<std::string,size_t> global_stamp_name_map;
-extern std::vector<std::string> global_stamp_names;
+extern std::map<std::string,size_t> global_unshifted_nowhere_stamp_name_map;
+extern std::vector<std::string> global_unshifted_nowhere_stamp_names;
 extern size_t global_last_stamp;
 extern void register_stamp_name(const std::string& stamp_name, size_t stamp_num);
 

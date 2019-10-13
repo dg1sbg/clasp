@@ -185,8 +185,10 @@ VALID_OPTIONS = [
 ]
 
 DEBUG_OPTIONS = [
+    "DEBUG_DTREE_INTERPRETER", # Generate dtree interpreter log
     "DEBUG_DTRACE_LOCK_PROBE", # Add a Dtrace probe for mutex lock acquisition
     "DEBUG_STACKMAPS", # print messages about stackmap registration
+    "DEBUG_ASSERT", # Turn on DEBUG_ASSERT
     "DEBUG_ASSERT_TYPE_CAST", # Turn on type checking when passing arguments
     "SOURCE_DEBUG", # Allow LOG messages to print - works with CLASP_DEBUG environment variable
     "DEBUG_JIT_LOG_SYMBOLS", # Generate a log of JITted symbols in /tmp/clasp-symbols-<pid>
@@ -210,9 +212,11 @@ DEBUG_OPTIONS = [
     ##  Generate per-thread logs in /tmp/dispatch-history/**  of the slow path of fastgf
     "DEBUG_REHASH_COUNT",   # Keep track of the number of times each hash table has been rehashed
     "DEBUG_MONITOR",   # generate logging messages to a file in /tmp for non-hot code
+    "DEBUG_MONITOR_SUPPORT",   # Must be enabled with other options - do this automatically?
     "DEBUG_MEMORY_PROFILE",  # Profile memory allocations total size and counter
     "DEBUG_BCLASP_LISP",  # Generate debugging frames for all bclasp code - like declaim
-    "DEBUG_CCLASP_LISP",  # Generate debugging frames for all cclasp code - like declaim
+    "DEBUG_CCLASP_LISP",  # Generate debugging frames for all cclasp code - like declaim (default on)
+    "DISABLE_DEBUG_CCLASP_LISP", # turn OFF debugging frames for cclasp code
     "DEBUG_COUNT_ALLOCATIONS", # count per-thread allocations of instances of classes
     "DEBUG_COMPILER", # Turn on compiler debugging
     "DEBUG_LONG_CALL_HISTORY",   # The GF call histories used to blow up - this triggers an error if they get too long
@@ -230,7 +234,9 @@ DEBUG_OPTIONS = [
     "DEBUG_LLVM_OPTIMIZATION_LEVEL_0",
     "DEBUG_SLOW",    # Code runs slower due to checks - undefine to remove checks
     "USE_HUMAN_READABLE_BITCODE",
-    "CST", # build the CST version
+    "DEBUG_COMPILE_FILE_OUTPUT_INFO",
+    "DISABLE_CST", # build the AST version of the compiler
+    "CST", # build the CST version of the compiler (default)
     "CONFIG_VAR_COOL" # mps setting
 ]
 
@@ -247,34 +253,6 @@ def fetch_git_revision(path, url, revision = "", label = "master"):
     if ( ret != 0 ):
         raise Exception("Failed to fetch git url %s" % url)
 
-def add_cando_extension_dev(cfg):
-    log.pprint('BLUE', 'add_cando_extension_dev')
-    fetch_git_revision("extensions/cando",
-                       "https://github.com/drmeister/cando.git",
-                       label="dev")
-
-def add_cando_extension_testing(cfg):
-    log.pprint('BLUE', 'add_cando_extension_testing')
-    fetch_git_revision("extensions/cando",
-                       "https://github.com/drmeister/cando.git",
-                       label="testing")
-
-def add_cando_extension_preview(cfg):
-    log.pprint('BLUE', 'add_cando_extension_preview')
-    fetch_git_revision("extensions/cando",
-                       "https://github.com/drmeister/cando.git",
-                       label="preview")
-
-def add_cando_extension_master(cfg):
-    log.pprint('BLUE', 'add_cando_extension_master')
-    fetch_git_revision("extensions/cando",
-                       "https://github.com/drmeister/cando.git",
-                       label="master")
-
-def add_cando(cfg):
-    add_cando_extension_master(cfg)
-
-    
 def update_dependencies(cfg):
     # Specifying only label = "some-tag" will check out that tag into a "detached head", but
     # specifying both label = "master" and revision = "some-tag" will stay on master and reset to that revision.
@@ -284,10 +262,10 @@ def update_dependencies(cfg):
 #                       "master")
     fetch_git_revision("src/lisp/kernel/contrib/sicl",
                        "https://github.com/Bike/SICL.git",
-                       "8b6c8bc6c1b31b5e0a9fc0554e6a6dc24eccb24f")
+                       "bf49bb239950169e5153e01b4c1d400ff663558d")
     fetch_git_revision("src/lisp/kernel/contrib/Concrete-Syntax-Tree",
                        "https://github.com/robert-strandh/Concrete-Syntax-Tree.git",
-                       "8d8c5abf8f1690cb2b765241d81c2eb86d60d77e")
+                       "654cdbf1fdb0625d3c68144c8806704e2f97f34b")
     fetch_git_revision("src/lisp/kernel/contrib/closer-mop",
                        "https://github.com/pcostanza/closer-mop.git",
                        "d4d1c7aa6aba9b4ac8b7bb78ff4902a52126633f")
@@ -814,6 +792,21 @@ def configure(cfg):
 
     cfg.env["BUILD_ROOT"] = os.path.abspath(top) # KLUDGE there should be a better way than this
     load_local_config(cfg)
+    
+    if ("DISABLE_CST" in cfg.env.DEBUG_OPTIONS):
+        pass
+    else:
+        cfg.define("CST",1)
+        if ("CST" not in cfg.env.DEBUG_OPTIONS):
+            cfg.env.DEBUG_OPTIONS.append("CST")
+            
+    if ("DISABLE_DEBUG_CCLASP_LISP" in cfg.env.DEBUG_OPTIONS):
+        pass
+    else:
+        cfg.define("DEBUG_CCLASP_LISP",1)
+        if ("DEBUG_CCLASP_LISP" not in cfg.env.DEBUG_OPTIONS):
+            cfg.env.DEBUG_OPTIONS.append(["DEBUG_CCLASP_LISP"])
+
     cfg.load("why")
     cfg.check_waf_version(mini = '1.7.5')
     cfg.env["DEST_OS"] = cfg.env["DEST_OS"] or Utils.unversioned_sys_platform()
@@ -982,8 +975,8 @@ def configure(cfg):
 #    cfg.define("EXPAT",1)
     cfg.define("INCLUDED_FROM_CLASP",1)
     cfg.define("INHERITED_FROM_SRC",1)
-    cfg.define("LLVM_VERSION_X100",400)
-    cfg.define("LLVM_VERSION","4.0")
+    cfg.define("LLVM_VERSION_X100",600)
+    cfg.define("LLVM_VERSION","6.0")
     cfg.define("NDEBUG",1)
 #    cfg.define("READLINE",1)
 #    cfg.define("USE_EXPENSIVE_BACKTRACE",1)
@@ -1061,7 +1054,9 @@ def configure(cfg):
         cfg.define("DEBUG_GUARD_VALIDATE",1)
     if (cfg.env.DEBUG_GUARD_EXHAUSTIVE_VALIDATE):
         cfg.define("DEBUG_GUARD_EXHAUSTIVE_VALIDATE",1)
+    cfg.define("DEBUG_MONITOR_SUPPORT",1) 
     if (cfg.env.DEBUG_OPTIONS):
+        # on by default - figure out how to shut it off later and remove all of the code that depends on it
         for opt in cfg.env.DEBUG_OPTIONS:
             if (opt in DEBUG_OPTIONS):
                 cfg.define(opt,1)
@@ -1580,6 +1575,9 @@ class link_fasl(clasp_task):
                   [ "-o", self.outputs[0].abspath() ]
         return self.exec_command(cmd)
 
+    def display(self):
+        return "link_fasl.display() would be VERY long - remove display() to display\n"
+
 class link_executable(clasp_task):
     def run(self):
         if (self.env.LTO_FLAG):
@@ -1607,6 +1605,10 @@ class link_executable(clasp_task):
               lto_object_path_lto + \
               [ "-o", self.outputs[0].abspath()]
         return self.exec_command(cmd)
+
+    def display(self):
+        return "link_executable.display() would be VERY long - remove display() to display\n"
+
 
 class run_aclasp(clasp_task):
     def run(self):
@@ -1678,6 +1680,9 @@ class compile_cclasp(clasp_task):
                                       *self.bld.clasp_cclasp)
         return self.exec_command(cmd)
 
+    def display(self):
+        return "compile_cclasp.display(self) would generate a LONG line - suppressing - disable display(self) to display\n"
+    
 class recompile_cclasp(clasp_task):
     def run(self):
         env = self.env
@@ -1739,9 +1744,12 @@ class link_bitcode(clasp_task):
         for f in self.inputs:
             all_inputs.write(' %s' % f.abspath())
         cmd = "" + self.env.LLVM_AR_BINARY + " ru %s %s" % (self.outputs[0], all_inputs.getvalue())
-        print("link_bitcode command: %s" % cmd);
+        # print("link_bitcode command: %s" % cmd);
         return self.exec_command(cmd)
 
+    def display(self):
+        return "link_bitcode.display(self): generates a LONG line - suppressing output - remove display() to display\n"
+    
 class build_bitcode(clasp_task):
     def run(self):
         env = self.env
@@ -1823,6 +1831,10 @@ class generate_sif_files(scraper_task):
             cmd.append(sif_node.abspath())
         return self.exec_command(cmd)
 
+    def display(self):
+        return "generate_sif_files.display() would be VERY long - remove display() to display\n"
+
+    
 class generate_headers_from_all_sifs(scraper_task):
     waf_print_keyword = "Scraping, generate-headers-from-all-sifs"
 
@@ -1836,6 +1848,9 @@ class generate_headers_from_all_sifs(scraper_task):
             cmd.append(f.abspath())
         return self.exec_command(cmd)
 
+    def display(self):
+        return "generate_headers_from_all_sifs.display() would be VERY long - remove display() to display\n"
+    
 def make_pump_tasks(bld, template_dir, output_dir):
     log.debug("Building pump tasks: %s -> %s", template_dir, output_dir)
     templates = collect_waf_nodes(bld, template_dir, suffix = '.pmp')

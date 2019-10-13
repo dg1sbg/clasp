@@ -19,31 +19,35 @@
     (cleavir-policy:compute-policy-quality quality optimize *clasp-env*))
 
 (defmethod cleavir-policy:policy-qualities append ((env clasp-global-environment))
-  '((maintain-shadow-stack boolean t)
+  '((save-register-args boolean t)
+    (core::insert-array-bounds-checks boolean t)
+    (trust-type-declarations boolean nil)
     (do-type-inference boolean t)
     (do-dx-analysis boolean t)))
 ;;; FIXME: Can't just punt like normal since it's an APPEND method combo.
 (defmethod cleavir-policy:policy-qualities append ((env null))
-  '((maintain-shadow-stack boolean t)
+  '((save-register-args boolean t)
+    (core::insert-array-bounds-checks boolean t)
+    (trust-type-declarations boolean nil)
     (do-type-inference boolean t)
     (do-dx-analysis boolean t)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
-;;; Policy MAINTAIN-SHADOW-STACK.
+;;; Policy SAVE-REGISTER-ARGS.
 ;;;
 ;;; Clasp presently maintains a stack trace by doing things
 ;;; at runtime. This is expensive but doing otherwise is
-;;; slow going. If MAINTAIN-SHADOW-STACK is false this stuff
+;;; slow going. If SAVE-REGISTER-ARGS is false this stuff
 ;;; is not inserted, so functions so compiled won't show up
 ;;; in backtraces.
 
 (defmethod cleavir-policy:compute-policy-quality
-    ((quality (eql 'maintain-shadow-stack))
+    ((quality (eql 'save-register-args))
      optimize
      (environment clasp-global-environment))
   #-debug-cclasp-lisp(= (cleavir-policy:optimize-value optimize 'debug) 3)
-  #+debug-cclasp-lisp t)
+  #+debug-cclasp-lisp (> (cleavir-policy:optimize-value optimize 'debug) 0))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -69,8 +73,47 @@
   (> (cleavir-policy:optimize-value optimize 'space)
      (cleavir-policy:optimize-value optimize 'compilation-speed)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Policy CORE::INSERT-ARRAY-BOUNDS-CHECKS
+
+;;; Should calls to aref and such do a bounds check?
+;;; In CORE package so we can use it in earlier code.
+
+(defmethod cleavir-policy:compute-policy-quality
+    ((quality (eql 'core::insert-array-bounds-checks))
+     optimize
+     (environment clasp-global-environment))
+  (> (cleavir-policy:optimize-value optimize 'safety) 0))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; POLICY TRUST-TYPE-DECLARATIONS
+;;;
+;;; Should type declarations be trusted for unsafe transforms?
+;;; If this is true, crashes can result if type declarations
+;;; are wrong, so per the definition of "safe code" it must be
+;;; false at safety 3.
+;;; NOTE: This is only really necessary because of our non
+;;; existent type inference. Policies need a FIXME rethink
+;;; once things are less broken.
+
+(defmethod cleavir-policy:compute-policy-quality
+    ((quality (eql 'trust-type-declarations))
+     optimize
+     (environment clasp-global-environment))
+  (let ((safety (cleavir-policy:optimize-value optimize 'safety)))
+    (and (zerop safety)
+         (> (cleavir-policy:optimize-value optimize 'speed) safety))))
+
+;;;
+
 (defun has-policy-p (instruction quality)
   (cleavir-policy:policy-value (cleavir-ir:policy instruction) quality))
+
+(defun environment-has-policy-p (environment quality)
+  (cleavir-policy:policy-value
+   (cleavir-env:policy (cleavir-env:optimize-info environment)) quality))
 
 ;;; Kildall can only be done on whole functions, due to how control flow in
 ;;; HIR works. But do not affect the top level enter instruction most of the time.
