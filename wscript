@@ -33,6 +33,7 @@
 
 import os, sys, logging
 import time, datetime
+import subprocess
 
 try:
     from StringIO import StringIO
@@ -239,6 +240,11 @@ DEBUG_OPTIONS = [
     "CST", # build the CST version of the compiler (default)
     "CONFIG_VAR_COOL" # mps setting
 ]
+
+def macosx_sdk_path():
+    # sdk_path = subprocess.check_output( [ '/usr/bin/xcode-select', '-p' ] )
+    sdk_path = '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
+    return sdk_path
 
 def build_extension(bld):
     log.pprint('BLUE', "build_extension()")
@@ -1034,8 +1040,8 @@ def configure(cfg):
         cfg.env.append_value('LINKFLAGS', ['-stdlib=libc++'])
         cfg.env.append_value('INCLUDES', '/usr/local/Cellar/libunwind-headers/35.3/include')  # brew install libunwind-headers
 # Add macOS SDK paths
-#        cfg.env.append_value('INCLUDES', [ ''.join( [ macosx_sdk_path(cfg), '/usr/include' ] ) ] ) 
-#        cfg.env.append_value('LINKFLAGS', ''.join( [ '-L', macosx_sdk_path(cfg), '/usr/lib' ] ) ) 
+        cfg.env.append_value('INCLUDES', [ ''.join( [ macosx_sdk_path(), '/usr/include' ] ) ] ) 
+        cfg.env.append_value('LINKFLAGS', ''.join( [ '-L', macosx_sdk_path(), '/usr/lib' ] ) ) 
     cfg.env.append_value('INCLUDES', [ run_llvm_config(cfg,"--includedir") ])
     cfg.env.append_value('INCLUDES', ['/usr/include'] )
     cfg.define("ENABLE_BACKTRACE_ARGS",1)
