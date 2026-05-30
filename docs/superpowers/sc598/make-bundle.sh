@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# !!! NON-FUNCTIONAL for the snapshot executable — see deploy-findings.md. !!!
-# Clasp's snapshot relocation re-runs `nm` on the SAVE-TIME library paths and dlsyms to
-# recompute load addresses, so moving the libs into ./lib aborts it (SIGABRT, pre-banner).
-# A working deploy needs a sysroot-correct build (M2/M3) or the `ninja install` base-image tree.
-# Kept for the record / the bisection it enabled.
+# WORKS with patch 0002 (snapshot-relocation-basename-match) applied to libclasp — see
+# deploy-findings.md. Without 0002, Clasp's snapshot load matches libraries by save-time path
+# and aborts when the libs move into ./lib; with 0002 it matches by basename -> relocatable.
+# Target runtime requirements: `nm` (binutils) on PATH + glibc >= the build's (Scarthgap 2.39).
 #
 # Build a self-contained Clasp deploy bundle for the ADSP-SC598 (aarch64 Scarthgap).
 # Run INSIDE the clasp-arm64 VM. Produces ~/clasp-sc598-bundle.tar.gz:
