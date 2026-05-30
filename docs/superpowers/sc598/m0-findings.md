@@ -4,10 +4,10 @@
 
 ## Decision: **GO**
 
-aarch64-linux Clasp **builds, boots, and bytecode-compiles**, and there is a **working
-consolidated deployable-image path** (a snapshot file loaded via `iclasp --snapshot`). One
-genuine upstream aarch64-linux bug was found, root-caused, and a fix verified; it blocks only
-the *standalone-executable* image form, which has a confirmed workaround.
+aarch64-linux Clasp **builds, boots, and bytecode-compiles**, and there are **working
+deployable-image paths**: the base image, a snapshot file (`iclasp --snapshot`), and — after
+the fix below — a **standalone executable snapshot**. One genuine upstream aarch64-linux bug
+was found, root-caused, **fixed, and verified end-to-end** (patch captured under `patches/`).
 
 ## Environment
 
@@ -54,10 +54,11 @@ clasp-in-features: T · fib(25)=75025 · compiled-square-7=49 · smoke-ok · rc=
      artifact (`NINJA_RC=0`, missing `snapshot-boehmprecise`).
    - Why only here: the Darwin path (`:1879`, `-sectcreate`) and x86-64-linux both work; **CI never
      exercises aarch64-linux ELF** (matrix is x86-64-ubuntu + aarch64-macOS).
-   - **Fix (verified, no rebuild):** objcopy with `--output-target elf64-littleaarch64
-     --binary-architecture aarch64` on the real 165 MB blob → rc=0, valid
-     `ELF 64-bit LSB relocatable, ARM aarch64` object. Parameterize the target by build arch
-     (`#if defined(__aarch64__)`), and fix the two `system(...) < 0` checks to detect non-zero exit.
+   - **Fix (APPLIED + verified end-to-end):** parameterize the objcopy target/arch by build arch
+     and correct the two `system(...)` exit checks — see
+     `patches/0001-snapshot-aarch64-objcopy.patch`. After the patch, `ninja snapshot-boehmprecise`
+     → `NINJA_RC=0` and produces a working **212 MB** `ELF 64-bit … ARM aarch64` PIE executable that
+     boots from its embedded snapshot and passes the smoke test (`EXE_SMOKE_RC=0`).
 
 ## Investigations (unblock M1–M5 recipe)
 
@@ -94,5 +95,7 @@ prove core functionality. Run the full ANSI/regression suite once the snapshot-e
 ## Outstanding
 
 - **User input:** Yocto **release name** → LLVM-major pin for the recipe (M1).
-- **Decision:** land the `snapshotSaveLoad.cc` fix upstream now vs. defer and ship via snapshot-file.
-- Before any PR: check the bug against upstream HEAD / issues (may already be reported/fixed).
+- **Test suite (Task 7):** now runnable against the fixed snapshot; not yet run (smoke is green on
+  the base image, the snapshot file, and the standalone executable).
+- **Upstream PR (optional):** `patches/0001-snapshot-aarch64-objcopy.patch` is ready; before a PR,
+  check against upstream HEAD / issues (may already be reported).
