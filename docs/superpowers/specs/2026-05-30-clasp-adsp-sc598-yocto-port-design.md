@@ -36,7 +36,7 @@ drops into the SC598 rootfs.
 | Build/packaging | **Full Yocto from-source recipe** (reproducible meta-layer) |
 | Build host | **M-series Mac hosting a 4 KB-page aarch64 Linux VM** (Lima/UTM/Multipass); whole bitbake build runs inside the VM |
 | libc | **glibc** (confirmed) |
-| GC | **Boehm (BDW-GC)**, vendored in-tree |
+| GC | **Boehm *precise*** (`boehmprecise` variant), vendored in-tree — `save-lisp-and-die`/snapshot requires precise GC, confirmed M0 (the conservative `boehm` variant errors: "save-lisp-and-die only works for precise GC") |
 | DSP cores | **Out of scope for Lisp.** Lisp runs on the A55; SHARC+ cores orchestrated via RPMsg/shared memory by the application, not as Lisp execution targets |
 
 ---
@@ -54,10 +54,14 @@ cross-toolchain at it" does not work — something must execute aarch64 code dur
 
 ### 2.2 Three facts that make it tractable
 
-1. **Only one phase needs target execution.** koga (configure → generates `build.ninja`
-   + config headers) and the scraper (parses C++, generates binding code) both run on the
-   **host** Common Lisp (SBCL). The C++ compile is ordinary cross-compilation. The **only**
-   step that executes target `iclasp` is the **image bootstrap**.
+1. **Target execution is confined to a few finalization steps (refined by M0).** koga
+   (configure → `build.ninja` + headers), the scraper (`$cxx -E -DSCRAPING` + host-SBCL
+   `generate-sif`/`generate-headers`), and — in bytecode mode — **the compilation of the
+   whole Lisp system to bytecode** (`compile-bytecode-image` runs host `$lisp`=sbcl, emitting
+   architecture-independent bytecode) all run on the **host**. The C++ compile is ordinary
+   cross-compilation. The target `$clasp` is executed only for `make-snapshot`,
+   `generate-lisp-info`, `compile-systems`, and the test rules — a *smaller* surface than a
+   self-hosted native bootstrap, and on the aarch64 VM these run natively.
 
 2. **Bytecode build-mode removes the JIT from that one step.** With `build-mode :bytecode`
    (`src/koga/configure.lisp` `build-mode` slot; `src/koga/scripts.lisp:258-262` passes
