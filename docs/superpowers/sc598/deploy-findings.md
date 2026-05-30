@@ -1,7 +1,30 @@
-# SC598 deployment findings — the "just bundle the snapshot" shortcut does NOT work
+# SC598 deployment findings — snapshot relocation + the bundle shortcut
 
-**Date:** 2026-05-30. Supersedes the optimistic "Ubuntu 24.04 ≈ Scarthgap → the M0 snapshot
-will just run on the board" claim. That is **wrong for the snapshot**, for a path reason.
+**Date:** 2026-05-30.
+
+## ✅ RESOLVED (patch 0002): the bundle shortcut WORKS after a relocation fix
+
+The original problem (below) was that Clasp's snapshot load matched libraries by requiring the
+recorded save-time path to be a *suffix* of the loaded path (`library_with_name`, `debugger.cc`),
+so moving libs into `./lib` aborted (`SIGABRT` at `snapshotSaveLoad.cc:2120`, "Unable to find
+library"). **Fix — `patches/0002-snapshot-relocation-basename-match.patch`: match libraries by
+*basename* (SONAME) instead.** Verified: with the fixed `libclasp.so`, the self-contained bundle
+extracted to a *fresh* path boots from its embedded snapshot and runs (`smoke-ok`, rc 0). The
+snapshot is now **position-independent / relocatable**.
+
+**Board deployment is therefore viable WITHOUT the full sysroot SDK**, with two honest caveats:
+- the load still shells **`nm`** → the board image must include **binutils** (or bundle a static `nm`);
+- board glibc must be ≥ the build's (Scarthgap 2.39 == the Ubuntu 24.04 build ✓).
+The bundle carries its own `libLLVM`/`libstdc++`/etc., so those match by construction. **Still
+pending: validation on the actual board.** Optional follow-up: also drop the runtime `nm` by reading
+the ELF symtab in-process — would make the bundle fully self-contained (no binutils on target).
+
+---
+
+## Original analysis (why the naive bundle failed — kept for the record)
+
+The "Ubuntu 24.04 ≈ Scarthgap → the M0 snapshot will just run on the board" claim was wrong **as
+stated**: the snapshot was bound to save-time library *paths*. Patch 0002 removes that binding.
 
 ## What was tried
 
