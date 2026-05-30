@@ -42,14 +42,15 @@ set -euo pipefail
 
 NAME="${1:-clasp-arm64}"
 
-# template://ubuntu tracks the current Ubuntu LTS (24.04), which carries clang/llvm-18.
+# template://ubuntu-lts == Ubuntu 24.04 LTS (aarch64), which carries clang/llvm-18.
+# (The plain `ubuntu` template now tracks 25.10 -> newer LLVM, 21-risk; koga rejects 21.)
 limactl start \
   --name="${NAME}" \
   --cpus=8 \
   --memory=16 \
   --disk=100 \
   --tty=false \
-  template://ubuntu
+  template://ubuntu-lts
 
 echo "VM '${NAME}' started. Open a shell with:  limactl shell ${NAME}"
 ```
