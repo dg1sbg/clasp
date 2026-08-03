@@ -166,9 +166,10 @@
   :pin 1)
  (:name :cleavir
   :directory "src/lisp/kernel/contrib/Cleavir/"
-  :repository "https://github.com/s-expressionists/Cleavir.git"
-  :branch "main"
-  :pin 0)
+  :repository "https://github.com/dg1sbg/Cleavir.git"
+  :branch "feat/dx-declaration-local-calls"
+  :commit "4c256c1bf23f1b12ce806dcd405d7be21cd54e67"
+  :pin 1)
  (:name :closer-mop
   :directory "src/lisp/kernel/contrib/closer-mop/"
   :repository "https://codeberg.org/pcostanza/closer-mop.git"
