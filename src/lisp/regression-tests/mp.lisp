@@ -376,3 +376,25 @@
                    (with-foreign-word (a 16)
                      (clasp-ffi:%cas-mem-uint32 (+ a 1) 0 1))
                    :type program-error)
+
+;;; Returns true if THUNK's process is gone within SECONDS of being killed.
+(defun cancelled-within-p (thunk seconds)
+  (let ((p (mp:process-run-function nil thunk)))
+    (loop repeat 200 until (mp:process-active-p p) do (sleep 0.01))
+    (mp:process-kill p)
+    (loop repeat (ceiling seconds 0.01)
+          while (mp:process-active-p p)
+          do (sleep 0.01))
+    (not (mp:process-active-p p))))
+
+;;; A loop body of pure VM opcodes reaches no function-call safepoint, so it is
+;;; cancellable only if the interpreter polls interrupts on backward branches.
+(test-true cancel-opcode-only-loop
+           (cancelled-within-p (lambda () (loop)) 3))
+
+(test-true cancel-arithmetic-loop
+           (cancelled-within-p (lambda () (let ((x 0)) (loop (setq x (1+ x))))) 3))
+
+;;; Control: a loop that calls a function was always cancellable.
+(test-true cancel-loop-with-call
+           (cancelled-within-p (lambda () (loop (funcall #'identity 1))) 3))
