@@ -238,10 +238,40 @@
     (values (list last arg-types) args)))
 )
 
+;;; CORE:DLSYM allocates a fresh POINTER on every call, so a literal name is resolved once, here.
+(defvar *foreign-symbol-cells* '())
+
+(defun make-foreign-symbol-cell (name)
+  (let ((cell (cons nil name)))
+    (push cell *foreign-symbol-cells*)
+    cell))
+
+(defun resolve-foreign-symbol-cell (cell)
+  (setf (car cell)
+        (ensure-core-pointer (core:dlsym :rtld-default (cdr cell))
+                             "%foreign-funcall" (cdr cell))))
+
+(defun invalidate-foreign-symbol-cells ()
+  "Forget every memoised foreign address, so the next call to each one resolves it again."
+  (dolist (cell *foreign-symbol-cells*) (setf (car cell) nil))
+  (values))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+(defun foreign-symbol-address-form (name context)
+  "The form yielding NAME's address: memoised per call site when NAME is a literal string, and
+looked up on every call when it is not."
+  (if (stringp name)
+      (let ((cell (gensym "SYMBOL-CELL")))
+        `(let ((,cell (load-time-value (make-foreign-symbol-cell ,name) nil)))
+           (or (car ,cell) (resolve-foreign-symbol-cell ,cell))))
+      `(ensure-core-pointer (core:dlsym :rtld-default ,name) ,context ,name)))
+)
+
 (defmacro %foreign-funcall (name &rest arguments)
   (multiple-value-bind (signature args)
       (extract-signature arguments)
-    `(core:foreign-call-pointer ,signature (ensure-core-pointer (core:dlsym :rtld-default ,name) "%foreign-funcall" ,name) ,@args)))
+    `(core:foreign-call-pointer ,signature ,(foreign-symbol-address-form name "%foreign-funcall")
+                                ,@args)))
 
 (defmacro %foreign-funcall-pointer (ptr &rest arguments)
   (multiple-value-bind (signature args)
@@ -261,8 +291,7 @@ are the callee's fixed parameters and the rest are variadic."
       (extract-signature arguments)
     (check-fixed-count fixed-count (second signature) '%FOREIGN-FUNCALL-VARARGS)
     `(core:foreign-call-pointer ,(append signature (list fixed-count))
-                                (ensure-core-pointer (core:dlsym :rtld-default ,name)
-                                                     "%foreign-funcall-varargs" ,name)
+                                ,(foreign-symbol-address-form name "%foreign-funcall-varargs")
                                 ,@args)))
 
 (defmacro %foreign-funcall-pointer-varargs (ptr fixed-count &rest arguments)
@@ -281,10 +310,9 @@ are the callee's fixed parameters and the rest are variadic."
 ;;; a special form, but the bytecode will resort to calling the function, which
 ;;; will in turn compile something to use.
 
-;;; TODO: Set up Cleavir to lower %%foreign-funcall calls into actual foreign
-;;; calls ("inline" the foreign-caller). That should make BTB CFFI efficient.
-;;; Also set it up so that in the usual case where the foreign function is named,
-;;; the lookup is done before runtime.
+;;; TODO: Set up Cleavir to lower foreign calls into actual foreign calls ("inline" the
+;;; foreign-caller). The allocation is already gone -- see FOREIGN-CALL-POINTER below -- so what
+;;; remains to win there is call overhead, not consing.
 
 ;;; Cache table from foreign-call signatures to caller functions.
 ;;; A caller takes a function pointer and its arguments as arguments.
@@ -300,8 +328,20 @@ are the callee's fixed parameters and the rest are variadic."
          (ensure-core-pointer function-pointer "%%foreign-funcall" function-pointer)
          arguments))
 
+;;; Memoising the caller lets the call be a FUNCALL of known arity: no &rest list, so no cons per
+;;; argument, which is what routing through %%FOREIGN-FUNCALL cost.
+(defun make-foreign-caller-cell (signature) (cons nil signature))
+
+(defun resolve-foreign-caller-cell (cell)
+  (setf (car cell) (ensure-foreign-caller (cdr cell))))
+
 (defmacro core:foreign-call-pointer (signature pointer &rest arguments)
-  `(%%foreign-funcall ',signature ,pointer ,@arguments))
+  (let ((cell (gensym "CALLER-CELL")) (ptr (gensym "POINTER")))
+    `(let ((,cell (load-time-value (make-foreign-caller-cell ',signature) nil))
+           (,ptr ,pointer))
+       (funcall (or (car ,cell) (resolve-foreign-caller-cell ,cell))
+                (ensure-core-pointer ,ptr "foreign-call-pointer" ,ptr)
+                ,@arguments))))
 
 ;;; === F O R E I G N   L I B R A R Y   H A N D L I N G ===
 
@@ -323,6 +363,7 @@ are the callee's fixed parameters and the rest are variadic."
 (declaim (inline %close-foreign-library))
 (defun %close-foreign-library (ptr)
   "Close a foreign library."
+  (invalidate-foreign-symbol-cells)
   (%dlclose ptr))
 
 (defun close-foreign-libraries-on-save ()
