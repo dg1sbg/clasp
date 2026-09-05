@@ -1072,6 +1072,10 @@ core::T_sp PERCENTmem_set_double(core::Integer_sp address, core::T_sp value) {
   double v = translate::make_from_object<double>(value);
   tmp = mem_set<double>(core::clasp_to_uintptr_t(address), v);
   DEBUG_PRINT(BF("%s (%s:%d) | v = %d\n.") % __FUNCTION__ % __FILE__ % __LINE__ % v);
+  // Storing a double and reading it back yields the caller's own object, so hand that back rather
+  // than boxing the read: every write was allocating 24 bytes that (SETF MEM-REF) discards.
+  if (gc::IsA<core::DoubleFloat_sp>(value))
+    return value;
   return mk_double_float(tmp);
 }
 
@@ -1103,6 +1107,10 @@ core::T_sp PERCENTmem_set_pointer(core::Integer_sp address, core::T_sp value) {
   void* v = translate::make_from_object<void*>(value);
   tmp = mem_set<void*>(core::clasp_to_uintptr_t(address), v);
   DEBUG_PRINT(BF("%s (%s:%d) | v = %p\n.") % __FUNCTION__ % __FILE__ % __LINE__ % v);
+  // as for the double setter: the stored address IS the caller's own pointer, so hand that back
+  // rather than boxing a second one that (SETF MEM-REF) throws away.
+  if (gc::IsA<core::Pointer_sp>(value))
+    return value;
   return mk_pointer(tmp);
 }
 
