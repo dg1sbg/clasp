@@ -11,8 +11,7 @@
         ;; allocation.lisp: the bytecode tier's control-flow constructs still heap-allocate.
         ;; A name is removed from this list by the change that removes its bytes; until then a
         ;; test that starts reading 0 shows up as an Unexpected Success (the run still exits 0).
-        ;; unwind-protect: the protect opcode builds the cleanup closure
-        alloc.unwind-protect.nocapture
+        ;; unwind-protect: the protect opcode builds the cleanup closure (a capture-free one no longer)
         alloc.unwind-protect.capture-1 alloc.unwind-protect.capture-3
         alloc.unwind-protect.assigned-capture alloc.with-lock-held
         ;; multiple-value-bind: a macro over multiple-value-call of a lambda

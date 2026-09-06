@@ -233,6 +233,49 @@ static inline unsigned char* vm_branch(VirtualMachine& vm, ThreadLocalState* thr
   }
   return pc;
 }
+gctools::return_type bytecode_vm(VirtualMachine& vm, T_O** literals, T_O** closed, Closure_O* closure, core::T_O** fp,
+                                 core::T_O** sp, size_t lcc_nargs, core::T_O** lcc_args);
+
+// PROTECT, for both operand widths.  `c` indexes the cleanup template in LITERALS and `pc` sits on
+// the operand's last byte.  A template that closes over nothing is the cleanup function itself; only
+// one that captures is wrapped in a closure carrying the captured values.  The bytecode contract
+// (Maclina MACHINE.md, "protect") permits either, and the closure would have carried no environment.
+// Leaves SP and PC where the protected body's CLEANUP instruction left them.
+static inline void vm_protect(VirtualMachine& vm, MultipleValues& multipleValues, T_O** literals, T_O** closed,
+                              Closure_O* closure, core::T_O** fp, core::T_O**& sp, unsigned char*& pc, size_t c,
+                              size_t lcc_nargs, core::T_O** lcc_args) {
+  T_sp fn_sp((gctools::Tagged)literals[c]);
+  BytecodeSimpleFun_sp fn = fn_sp.as_assert<BytecodeSimpleFun_O>();
+  size_t nclosed = fn->environmentSize();
+  DBG_VM("  nclosed = %zu\n", nclosed);
+  vm._stackPointer = sp;
+  T_sp cleanup = fn;
+  if (nclosed > 0) {
+    Closure_sp cl = Closure_O::make_bytecode_closure(fn, nclosed);
+    vm.copyto(sp, nclosed, (T_O**)(cl->_Slots.data()));
+    vm.drop(sp, nclosed);
+    cleanup = cl;
+  }
+  // Now stick it onto the dynamic environment.
+  vm._pc = ++pc;
+  T_mv result = funwind_protect([&]() {
+    return bytecode_vm(vm, literals, closed, closure, fp, sp, lcc_nargs, lcc_args);
+  },
+    [&]() {
+      // Push a valid PC fixnum so bytecode_call (via eval::funcall) sees
+      // a proper frame header at fp[-3]. The CALL opcode normally does this
+      // before apply_raw, but cleanup thunks are called from C++ without one.
+      vm.push(vm._stackPointer, core::Integer_O::create((uintptr_t)pc).raw_());
+      eval::funcall(cleanup);
+      vm.drop(vm._stackPointer, 1);
+    });
+  // copied from vm_code::call - required to avoid the cleanup's values
+  // for... some reason. I'm not totally sure.
+  multipleValues.setN(result.raw_(), result.number_of_values());
+  sp = vm._stackPointer;
+  pc = vm._pc;
+}
+
 #ifdef DEBUG_VIRTUAL_MACHINE
 __attribute__((optnone))
 #endif
@@ -1019,35 +1062,7 @@ bytecode_vm(VirtualMachine& vm, T_O** literals, T_O** closed, Closure_O* closure
     case vm_code::protect: {
       uint8_t c = *(++pc);
       DBG_VM("protect %" PRIu8 "\n", c);
-      // Build a closure - this works mostly like make_closure.
-      T_sp fn_sp((gctools::Tagged)literals[c]);
-      BytecodeSimpleFun_sp fn = fn_sp.as_assert<BytecodeSimpleFun_O>();
-      size_t nclosed = fn->environmentSize();
-      DBG_VM("  nclosed = %zu\n", nclosed);
-      // Technically we could avoid consing a closure when nclosed = 0
-      // but I don't know that it's worth the trouble.
-      vm._stackPointer = sp;
-      Closure_sp cleanup = Closure_O::make_bytecode_closure(fn, nclosed);
-      vm.copyto(sp, nclosed, (T_O**)(cleanup->_Slots.data()));
-      vm.drop(sp, nclosed);
-      // Now stick it onto the dynamic environment.
-      vm._pc = ++pc;
-      T_mv result = funwind_protect([&]() {
-        return bytecode_vm(vm, literals, closed, closure, fp, sp, lcc_nargs, lcc_args);
-      },
-        [&]() {
-          // Push a valid PC fixnum so bytecode_call (via eval::funcall) sees
-          // a proper frame header at fp[-3]. The CALL opcode normally does this
-          // before apply_raw, but cleanup thunks are called from C++ without one.
-          vm.push(vm._stackPointer, core::Integer_O::create((uintptr_t)pc).raw_());
-          eval::funcall(cleanup);
-          vm.drop(vm._stackPointer, 1);
-        });
-      // copied from vm_code::call - required to avoid the cleanup's values
-      // for... some reason. I'm not totally sure.
-      multipleValues.setN(result.raw_(), result.number_of_values());
-      sp = vm._stackPointer;
-      pc = vm._pc;
+      vm_protect(vm, multipleValues, literals, closed, closure, fp, sp, pc, c, lcc_nargs, lcc_args);
       break;
     }
     case vm_code::cleanup: {
@@ -1529,26 +1544,7 @@ static unsigned char* long_dispatch(VirtualMachine& vm, unsigned char* pc, Multi
     uint8_t low = *(++pc);
     uint16_t c = low + (*(++pc) << 8);
     DBG_VM1("long protect %" PRIu16 "\n", c);
-    T_sp fn_sp((gctools::Tagged)literals[c]);
-    BytecodeSimpleFun_sp fn = fn_sp.as_assert<BytecodeSimpleFun_O>();
-    size_t nclosed = fn->environmentSize();
-    DBG_VM("  nclosed = %zu\n", nclosed);
-    vm._stackPointer = sp;
-    Closure_sp cleanup = Closure_O::make_bytecode_closure(fn, nclosed);
-    vm.copyto(sp, nclosed, (T_O**)(cleanup->_Slots.data()));
-    vm.drop(sp, nclosed);
-    vm._pc = ++pc;
-    T_mv result = funwind_protect([&]() {
-      return bytecode_vm(vm, literals, closed, closure, fp, sp, lcc_nargs, lcc_args);
-    },
-      [&]() {
-        vm.push(vm._stackPointer, core::Integer_O::create((uintptr_t)pc).raw_());
-        eval::funcall(cleanup);
-        vm.drop(vm._stackPointer, 1);
-      });
-    multipleValues.setN(result.raw_(), result.number_of_values());
-    sp = vm._stackPointer;
-    pc = vm._pc;
+    vm_protect(vm, multipleValues, literals, closed, closure, fp, sp, pc, c, lcc_nargs, lcc_args);
     break;
   }
   case vm_code::encell: {
