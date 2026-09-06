@@ -116,3 +116,36 @@
  (loop for x in (make-hash-table)
         do (format t "x = ~a~%" x))
  :type type-error)
+
+;;; FOR-AS-EQUALS-THEN's temp was bound to NIL under the user's strict type; only native code checks it
+(defun loop-typed-equals-native (form arg)
+  (let ((cmp:*compile-native* t))
+    (funcall (compile nil form) arg)))
+
+(test loop-typed-equals-cons-native
+      (loop-typed-equals-native
+       '(lambda (l) (loop for e in l for p of-type cons = (list e) collect p))
+       '(1 2))
+      (((1) (2))))
+
+(test loop-typed-equals-then-native
+      (loop-typed-equals-native
+       '(lambda (l) (loop for e in l for p of-type cons = (list e) then (list e e) collect p))
+       '(1 2))
+      (((1) (2 2))))
+
+(test loop-typed-equals-array-native
+      (loop-typed-equals-native
+       '(lambda (l)
+         (loop for e in l
+               for p of-type (simple-array fixnum (*))
+                 = (make-array 1 :element-type 'fixnum :initial-element e)
+               collect (aref p 0)))
+       '(1 2))
+      ((1 2)))
+
+(test loop-typed-equals-deducible-stays-strict
+      (loop-typed-equals-native
+       '(lambda (l) (loop for e in l for p of-type fixnum = (* 2 e) collect p))
+       '(1 2))
+      ((2 4)))
