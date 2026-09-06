@@ -23,6 +23,7 @@
     "array0"
     "tests01"
     "gc"
+    "allocation"
     "shmem"
     "strings01"
     "cons01"
