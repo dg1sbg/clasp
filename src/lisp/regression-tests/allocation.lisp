@@ -12,14 +12,8 @@
 ;;;; today in the test's :description.  The figure is exact by construction: the driver divides
 ;;;; the total by the call count, so a partial result shows up as a ratio, never as a rounded 0.
 
-(defvar *alloc-sink* nil)
-(defvar *alloc-lock* (mp:make-lock :name "allocation-test"))
-
-(declaim (notinline %alloc-touch %alloc-two %alloc-three %alloc-global-handler))
-(defun %alloc-touch (x) (setq *alloc-sink* x) nil)
-(defun %alloc-two (i) (values i (1+ i)))
-(defun %alloc-three (i) (values i (1+ i) (+ i 2)))
-(defun %alloc-global-handler (c) (declare (ignore c)) nil)
+;;; The sinks and the CLOS fixture are shared with allocation-native.lisp, which measures the same shapes.
+(load "sys:src;lisp;regression-tests;allocation-helpers.lisp")
 
 ;;; The driver is bytecode too, so its own loop cannot be charged to the construct.
 (defparameter *alloc-driver*

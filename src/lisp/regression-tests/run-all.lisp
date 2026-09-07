@@ -24,6 +24,7 @@
     "tests01"
     "gc"
     "allocation"
+    "allocation-native"
     "strings01"
     "cons01"
     "sequences01"
