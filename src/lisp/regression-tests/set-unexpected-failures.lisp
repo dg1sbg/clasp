@@ -21,5 +21,17 @@
         alloc.handler-case.novar alloc.handler-case.var
         ;; a closed-over tagbody: the entry opcode's heap dynenv
         alloc.closed-over-tagbody
+        ;; allocation-native.lisp: the NATIVE tier's targets, each under the slice of the closure-law
+        ;; plan (neoseidr docs/plans/2026-09-06-clasp-closure-law/04-slices.md) that removes its bytes.
+        ;; slice 4 -- an unwind-protect cleanup becomes a stack closure
+        alloc-native.unwind-protect.capture-1 alloc-native.unwind-protect.capture-3
+        alloc-native.unwind-protect.assigned-capture alloc-native.with-lock-held
+        ;; slice 5 -- the contf &rest gather becomes a vaslist
+        alloc-native.cnm-1arg alloc-native.cnm-2args
+        ;; slice 5 takes handler-case to the cluster's 72; slice 6 takes the cluster to 0
+        alloc-native.handler-bind alloc-native.handler-bind.two alloc-native.catch-handler-bind
+        alloc-native.handler-case.novar alloc-native.handler-case.var alloc-native.ignore-errors
+        ;; slice 7 -- a declared DYNAMIC-EXTENT local function becomes a stack closure
+        alloc-native.dx-flet
         ;; on boehm key-or-value tables are effectively strong.
         #+use-boehm weak-key-or-value-weakness))

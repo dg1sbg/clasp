@@ -24,6 +24,7 @@
     "tests01"
     "gc"
     "allocation"
+    "allocation-native"
     "shmem"
     "strings01"
     "cons01"
