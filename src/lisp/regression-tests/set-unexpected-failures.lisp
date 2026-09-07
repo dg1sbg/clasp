@@ -26,9 +26,7 @@
         alloc.closed-over-tagbody
         ;; allocation-native.lisp: the NATIVE tier's targets, each under the slice of the closure-law
         ;; plan (neoseidr docs/plans/2026-09-06-clasp-closure-law/04-slices.md) that removes its bytes.
-        ;; slice 4 -- an unwind-protect cleanup becomes a stack closure
-        alloc-native.unwind-protect.capture-1 alloc-native.unwind-protect.capture-3
-        alloc-native.unwind-protect.assigned-capture alloc-native.with-lock-held
+        ;; slice 4 made an unwind-protect cleanup a stack closure: its four rows and with-lock read 0
         ;; slice 5 -- the contf &rest gather becomes a vaslist
         alloc-native.cnm-1arg alloc-native.cnm-2args
         ;; slice 5 takes handler-case to the cluster's 72; slice 6 takes the cluster to 0

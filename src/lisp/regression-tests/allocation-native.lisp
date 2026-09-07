@@ -117,27 +117,27 @@ result's entry is a SIMPLE-CORE-FUN, so this file never measures a bytecode func
 (test alloc-native.unwind-protect.capture-1
       (native-bytes-per-call '(lambda (i) (let ((y i)) (unwind-protect (%alloc-touch i) (%alloc-touch y)))))
       (0)
-      :description "reads 40 today: the cleanup thunk is a heap closure over one variable (slice 4)")
+      :description "read 40 until slice 4: the cleanup thunk was a heap closure over one variable; it lives in the frame now")
 
 (test alloc-native.unwind-protect.capture-3
       (native-bytes-per-call '(lambda (i) (let ((y i) (z (1+ i)) (w (+ i 2))) (unwind-protect (%alloc-touch i) (%alloc-touch (+ y z w))))))
       (0)
-      :description "reads 56 today: 32 + 8 per captured variable (slice 4)")
+      :description "read 56 until slice 4: 32 + 8 per captured variable, on the heap; in the frame now")
 
 (test alloc-native.unwind-protect.assigned-capture
       (native-bytes-per-call '(lambda (i) (let ((y i)) (unwind-protect (setq y (1+ y)) (%alloc-touch y)))))
       (0)
-      :description "reads 64 today: the closure plus a cell for the captured, assigned variable (slice 4)")
+      :description "read 64 until slice 4: the closure plus a cell for the captured, assigned variable; the variable is an alloca now")
 
 (test alloc-native.with-lock-held
       (native-bytes-per-call '(lambda (i) (mp:with-lock (*alloc-lock*) (%alloc-touch i))))
       (0)
-      :description "reads 40 today: WITH-LOCK's cleanup captures the lock it must release (slice 4)")
+      :description "read 40 until slice 4: WITH-LOCK's cleanup captures the lock it must release, and that closure is in the frame now")
 
 (test alloc-native.dx-flet
       (native-bytes-per-call '(lambda (i) (flet ((f () (%alloc-touch i))) (declare (dynamic-extent #'f)) (%alloc-call #'f))))
       (0)
-      :description "reads 40 today: the DYNAMIC-EXTENT declaration reaches no BIR slot and the stack arm of ENCLOSE is disabled (slice 7)")
+      :description "reads 40 today: the DYNAMIC-EXTENT declaration reaches no BIR slot, and ENCLOSE puts only an unwind-protect cleanup in the frame (slice 7)")
 
 (test alloc-native.handler-bind
       (native-bytes-per-call '(lambda (i) (handler-bind ((%alloc-full #'%alloc-global-handler)) (%alloc-touch i))))
@@ -178,3 +178,35 @@ result's entry is a SIMPLE-CORE-FUN, so this file never measures a bytecode func
       (native-bytes-per-call '(lambda (i) (%alloc-touch (%alloc-gf2 *alloc-sub* i))))
       (0)
       :description "reads 48 today: 24 per required argument (slice 5)")
+
+;;; ---- the stack cleanup's correctness: a THROW through it, and the collector under it -------
+
+(test alloc-native.throw-through-cleanup
+      (let ((seen nil))
+        (funcall (native-compile
+                  '(lambda (i)
+                    (let ((y i))
+                      (catch 'alloc-tag
+                        (unwind-protect (progn (setq y (+ y 1)) (throw 'alloc-tag nil))
+                          (%alloc-touch y))))))
+                 41)
+        (setq seen *alloc-sink*)
+        seen)
+      (42)
+      :description "a stack cleanup closing over an assigned variable sees the assignment after a THROW through the protected form")
+
+(test alloc-native.gc-stress-stack-cleanup
+      (let ((total 0))
+        (dotimes (round 60 total)
+          (incf total
+                (funcall (native-compile
+                          '(lambda (i)
+                            (let ((acc 0) (y i))
+                              (unwind-protect
+                                   (progn (dotimes (k 200) (setq acc (+ acc (length (list k k k)))))
+                                          (gctools:garbage-collect)
+                                          acc)
+                                (setq acc (+ acc y)) (%alloc-touch acc)))))
+                         1))))
+      (36000)
+      :description "60 rounds of a live stack cleanup across a forced collection with allocation inside the protected form: the process survives and every value is right (600 = 200 x 3 per round)")
