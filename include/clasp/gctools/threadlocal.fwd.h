@@ -1,10 +1,23 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <signal.h>
 #include <chrono>
 #ifdef USE_MMTK
 #include <clasp/gctools/mmtk_clasp.h>
 #endif
+
+namespace core {
+bool allocation_profiler_running();
+bool allocation_profiler_session(uint64_t& session_epoch,
+                                 size_t& bytes_per_sample);
+void allocation_profiler_record(uint32_t stamp_wtag,
+                                size_t allocation_size,
+                                size_t sampled_bytes,
+                                uint32_t flags,
+                                uint64_t session_epoch);
+}
 
 namespace gctools {
 
@@ -18,6 +31,12 @@ struct AllocationProfiler {
   size_t _AllocationNumberThreshold;
   int64_t _AllocationSizeCounter = 0;
   int64_t _AllocationNumberCounter = 0;
+  uint64_t _AllocationProfileEpoch = 0;
+  size_t _AllocationProfileBytesPending = 0;
+  bool _InAllocationProfiler = false;
+
+  void registerAllocationSlow(stamp_t stamp, size_t size,
+                              uint32_t flags);
 
   AllocationProfiler()
     : _AllocationSizeThreshold(1024 * 1024), _AllocationNumberThreshold(16386) {};
@@ -28,11 +47,16 @@ struct AllocationProfiler {
     this->_BytesAllocated += size;
     this->_AllocationSizeCounter += size;
     this->_AllocationNumberCounter++;
+
+    if (this->_AllocationSizeThreshold != 0 &&
+        this->_AllocationSizeCounter >=
+          static_cast<int64_t>(this->_AllocationSizeThreshold)) [[unlikely]] {
+      this->registerAllocationSlow(stamp, size, 0);
+    }
   };
+
   inline void registerWeakAllocation(uintptr_t stamp, size_t size) {
-    this->_BytesAllocated += size;
-    this->_AllocationSizeCounter += size;
-    this->_AllocationNumberCounter++;
+    this->registerAllocation(static_cast<stamp_t>(stamp), size);
   };
 };
 

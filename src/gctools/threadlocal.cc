@@ -104,6 +104,15 @@ ThreadLocalStateLowLevel::ThreadLocalStateLowLevel()
     : _DisableInterrupts(false)
 {
   update_stack_bounds();
+
+  // A thread created during an active allocation-profile session begins
+  // in that session immediately, rather than discarding its first polling
+  // quantum when it first reaches the sparse slow path.
+  uint64_t session_epoch = 0;
+  size_t bytes_per_sample = 0;
+  if (core::allocation_profiler_session(session_epoch,
+                                        bytes_per_sample))
+    this->_Allocations._AllocationProfileEpoch = session_epoch;
 }
 
 void ThreadLocalStateLowLevel::update_stack_bounds() {

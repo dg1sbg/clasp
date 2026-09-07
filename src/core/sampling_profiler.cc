@@ -51,12 +51,15 @@
 #include <dlfcn.h>
 #include <unordered_map>
 #include <string>
+#include <thread>
 #include <vector>
 #include <algorithm>
 
 #include <clasp/core/foundation.h>
 #include <clasp/core/lisp.h>
 #include <clasp/core/sampling_profiler.h>
+#include <clasp/gctools/gc_boot.h>
+#include <clasp/gctools/threadlocal.fwd.h>
 #include <clasp/llvmo/trampoline_arena.h>   // arena_lookup_by_pc
 
 namespace core {
@@ -76,11 +79,34 @@ std::atomic<size_t>   g_write_offset{0};    // next free byte in g_buffer
 unsigned              g_max_depth = 8192;
 std::atomic<uint64_t> g_samples_recorded{0};
 std::atomic<uint64_t> g_samples_dropped{0};
+std::atomic<uint32_t> g_active_sample_writers{0};
+std::atomic<uint64_t> g_sampling_session_epoch{0};
+
+static constexpr size_t kAllocationPollBytes =
+  1024ull * 1024ull;
+static constexpr size_t kDefaultAllocationBufferBytes =
+  64ull * 1024ull * 1024ull;
+static constexpr unsigned kMaxAllocationDepth = 4096;
+
+std::atomic<bool>     g_allocation_running{false};
+std::atomic<uint64_t> g_allocation_session_epoch{0};
+std::atomic<size_t>   g_allocation_bytes_per_sample{
+  kAllocationPollBytes
+};
+uint8_t*              g_allocation_buffer = nullptr;
+size_t                g_allocation_buffer_bytes = 0;
+std::atomic<size_t>   g_allocation_write_offset{0};
+unsigned              g_allocation_max_depth = kMaxAllocationDepth;
+std::atomic<uint64_t> g_allocation_samples_recorded{0};
+std::atomic<uint64_t> g_allocation_samples_dropped{0};
+std::atomic<uint64_t> g_allocation_bytes_attributed{0};
+std::atomic<uint64_t> g_allocation_bytes_dropped{0};
+std::atomic<uint32_t> g_active_allocation_writers{0};
 
 struct sigaction      g_prev_sigaction;     // clasp's original SIGPROF handler
 bool                  g_prev_sigaction_saved = false;
 
-std::mutex            g_lifecycle_lock;     // serializes start/stop/save/reset
+std::mutex            g_lifecycle_lock;     // serializes both profiler lifecycles
 
 // ---------------------------------------------------------------------------
 // Executable-range cache for return-address validation.
@@ -112,8 +138,15 @@ static size_t      g_exec_range_count = 0;
 static constexpr size_t MAX_DYNAMIC_EXEC_RANGES = 4096;
 static ExecRange   g_dynamic_exec_ranges[MAX_DYNAMIC_EXEC_RANGES];
 static std::atomic<size_t> g_dynamic_exec_range_count{0};
+static std::mutex  g_dynamic_exec_range_writer_lock;
 
 static void build_exec_range_cache() {
+  // JIT threads may register executable ranges concurrently with setup.
+  // The signal handler never takes this lock; publication still occurs
+  // through g_dynamic_exec_range_count.
+  std::lock_guard<std::mutex> writer_guard(
+    g_dynamic_exec_range_writer_lock);
+
   // Free previous cache if any.
   if (g_exec_ranges) { free(g_exec_ranges); g_exec_ranges = nullptr; }
   g_exec_range_count = 0;
@@ -294,10 +327,13 @@ static void populate_stack_bounds_for_this_thread() {
 
 // Validate an rbp candidate: word-aligned and inside the current thread's
 // stack range. The walker terminates as soon as this check fails.
-static inline bool plausible_rbp(uintptr_t rbp) {
+static inline bool plausible_rbp(uintptr_t rbp,
+                                 uintptr_t stack_lo,
+                                 uintptr_t stack_hi) {
   if ((rbp & 7) != 0) return false;
-  if (!t_stack_bounds.populated) return false;
-  return rbp >= t_stack_bounds.lo && rbp + 16 <= t_stack_bounds.hi;
+  if (stack_hi < stack_lo || stack_hi - stack_lo < 16)
+    return false;
+  return rbp >= stack_lo && rbp <= stack_hi - 16;
 }
 
 // Walk the frame-pointer chain starting at (rip, rbp) and fill `out` with
@@ -313,12 +349,14 @@ static inline bool plausible_rbp(uintptr_t rbp) {
 // Safety: uses only register-read + bounded pointer walk + plausibility
 // checks + out-of-process writes. No libc calls, no allocation, no locks.
 static uint32_t walk_fp(uintptr_t rip_top, uintptr_t rbp_top,
-                        uint64_t* out, uint32_t max_depth) {
+                        uint64_t* out, uint32_t max_depth,
+                        uintptr_t stack_lo, uintptr_t stack_hi) {
   if (max_depth == 0) return 0;
   uint32_t d = 0;
   out[d++] = (uint64_t)rip_top;
   uintptr_t rbp = rbp_top;
-  while (d < max_depth && plausible_rbp(rbp)) {
+  while (d < max_depth &&
+         plausible_rbp(rbp, stack_lo, stack_hi)) {
     uintptr_t saved_rbp = *((uintptr_t*)rbp);
     uintptr_t saved_rip = *((uintptr_t*)(rbp + 8));
     if (!plausible_rip(saved_rip)) break;
@@ -335,15 +373,20 @@ static uint32_t walk_fp(uintptr_t rip_top, uintptr_t rbp_top,
 // Reserve `bytes` from the bump buffer. Returns nullptr when the buffer is
 // full — the caller increments the drop counter. Async-signal-safe: single
 // CAS loop on a plain atomic counter, no allocation, no libc.
-static inline uint8_t* ring_reserve(size_t bytes) {
-  size_t cur = g_write_offset.load(std::memory_order_relaxed);
+static inline uint8_t* ring_reserve(
+    uint8_t* buffer,
+    size_t buffer_bytes,
+    std::atomic<size_t>& write_offset,
+    size_t bytes) {
+  if (!buffer || bytes > buffer_bytes) return nullptr;
+  size_t cur = write_offset.load(std::memory_order_relaxed);
   for (;;) {
+    if (cur > buffer_bytes - bytes) return nullptr;
     size_t next = cur + bytes;
-    if (next > g_buffer_bytes) return nullptr;
-    if (g_write_offset.compare_exchange_weak(cur, next,
-                                             std::memory_order_acq_rel,
-                                             std::memory_order_relaxed)) {
-      return g_buffer + cur;
+    if (write_offset.compare_exchange_weak(cur, next,
+                                           std::memory_order_acq_rel,
+                                           std::memory_order_relaxed)) {
+      return buffer + cur;
     }
     // cur was updated by CAS failure; retry.
   }
@@ -357,7 +400,18 @@ static inline uint8_t* ring_reserve(size_t bytes) {
 // the ring and copy the result in. This avoids over-reserving or needing
 // a two-step reserve/commit protocol.
 static void sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucptr) {
-  if (!g_running.load(std::memory_order_acquire)) return;
+  uint64_t session_epoch = g_sampling_session_epoch.load();
+
+  // Increment before testing g_running. Together with the sequentially
+  // consistent stop-side store/load, this closes the race in which stop
+  // could otherwise miss a handler that had begun but not yet published
+  // its record.
+  g_active_sample_writers.fetch_add(1);
+  if (!g_running.load() ||
+      session_epoch != g_sampling_session_epoch.load()) {
+    g_active_sample_writers.fetch_sub(1);
+    return;
+  }
 
   // NEVER call pthread_getattr_np (or anything that can malloc) from a
   // signal handler. On glibc pthread_getattr_np calls malloc, and if the
@@ -383,16 +437,19 @@ static void sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucptr) {
   if (cap > 8192) cap = 8192;
   uint32_t depth;
   if (t_stack_bounds.populated) {
-    depth = walk_fp(rip, rbp, pcs, cap);
+    depth = walk_fp(rip, rbp, pcs, cap,
+                    t_stack_bounds.lo, t_stack_bounds.hi);
   } else {
     pcs[0] = (uint64_t)rip;
     depth = 1;
   }
 
   const size_t record_bytes = sizeof(SampleHeader) + depth * sizeof(uint64_t);
-  uint8_t* slot = ring_reserve(record_bytes);
+  uint8_t* slot = ring_reserve(g_buffer, g_buffer_bytes,
+                               g_write_offset, record_bytes);
   if (!slot) {
     g_samples_dropped.fetch_add(1, std::memory_order_relaxed);
+    g_active_sample_writers.fetch_sub(1);
     return;
   }
 
@@ -408,6 +465,7 @@ static void sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucptr) {
   std::memcpy(slot + sizeof(SampleHeader), pcs, depth * sizeof(uint64_t));
 
   g_samples_recorded.fetch_add(1, std::memory_order_relaxed);
+  g_active_sample_writers.fetch_sub(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +520,250 @@ static void disarm_timer() {
 // Public API.
 // ---------------------------------------------------------------------------
 
+bool allocation_profiler_running() {
+  return g_allocation_running.load(std::memory_order_acquire);
+}
+
+bool allocation_profiler_session(uint64_t& session_epoch,
+                                 size_t& bytes_per_sample) {
+  if (!g_allocation_running.load(std::memory_order_acquire))
+    return false;
+
+  uint64_t epoch =
+    g_allocation_session_epoch.load(std::memory_order_acquire);
+  size_t interval =
+    g_allocation_bytes_per_sample.load(std::memory_order_relaxed);
+
+  // Reject a snapshot that straddled stop/restart.
+  if (!g_allocation_running.load(std::memory_order_acquire) ||
+      epoch !=
+        g_allocation_session_epoch.load(std::memory_order_acquire))
+    return false;
+
+  session_epoch = epoch;
+  bytes_per_sample = interval;
+  return interval != 0;
+}
+
+__attribute__((noinline))
+void allocation_profiler_record(uint32_t stamp_wtag,
+                                size_t allocation_size,
+                                size_t sampled_bytes,
+                                uint32_t flags,
+                                uint64_t session_epoch) {
+  // Increment before checking session state. This prevents stop from
+  // overlooking an active writer, while the epoch rejects delayed calls
+  // belonging to an older session.
+  g_active_allocation_writers.fetch_add(
+    1, std::memory_order_acq_rel);
+  if (!g_allocation_running.load(std::memory_order_acquire) ||
+      session_epoch !=
+        g_allocation_session_epoch.load(std::memory_order_acquire)) {
+    g_active_allocation_writers.fetch_sub(
+      1, std::memory_order_acq_rel);
+    return;
+  }
+
+  uint64_t pcs[kMaxAllocationDepth];
+  uint32_t cap = g_allocation_max_depth;
+  uintptr_t rip = reinterpret_cast<uintptr_t>(
+    __builtin_extract_return_addr(__builtin_return_address(0)));
+  uint32_t depth = 1;
+  pcs[0] = static_cast<uint64_t>(rip);
+
+  if (my_thread_low_level) {
+    uintptr_t stack_lo = reinterpret_cast<uintptr_t>(
+      my_thread_low_level->_ControlStackTop);
+    uintptr_t stack_hi = reinterpret_cast<uintptr_t>(
+      my_thread_low_level->_ControlStackBottom);
+    uintptr_t current_fp = reinterpret_cast<uintptr_t>(
+      __builtin_frame_address(0));
+    uintptr_t caller_fp = 0;
+
+    // Starting with our caller's frame avoids duplicating rip as the
+    // first frame read from our own frame record.
+    if (plausible_rbp(current_fp, stack_lo, stack_hi))
+      caller_fp = *reinterpret_cast<uintptr_t*>(current_fp);
+
+    depth = walk_fp(rip, caller_fp, pcs, cap,
+                    stack_lo, stack_hi);
+  }
+
+  size_t record_bytes =
+    sizeof(AllocationSampleHeader) + depth * sizeof(uint64_t);
+  uint8_t* slot =
+    ring_reserve(g_allocation_buffer,
+                 g_allocation_buffer_bytes,
+                 g_allocation_write_offset,
+                 record_bytes);
+  if (!slot) {
+    g_allocation_samples_dropped.fetch_add(
+      1, std::memory_order_relaxed);
+    g_allocation_bytes_dropped.fetch_add(
+      sampled_bytes, std::memory_order_relaxed);
+    g_active_allocation_writers.fetch_sub(
+      1, std::memory_order_acq_rel);
+    return;
+  }
+
+  AllocationSampleHeader* header =
+    reinterpret_cast<AllocationSampleHeader*>(slot);
+  header->timestamp_ns = now_ns_signal_safe();
+  header->vm_pc = 0;
+  header->sampled_bytes = static_cast<uint64_t>(sampled_bytes);
+  header->allocation_size = static_cast<uint64_t>(allocation_size);
+#if defined(__linux__)
+  header->thread_id =
+    static_cast<uint32_t>(syscall(SYS_gettid));
+#else
+  header->thread_id = 0;
+#endif
+  header->depth = depth;
+  header->stamp_wtag = stamp_wtag;
+  header->flags = flags;
+  std::memcpy(slot + sizeof(AllocationSampleHeader),
+              pcs, depth * sizeof(uint64_t));
+
+  g_allocation_samples_recorded.fetch_add(
+    1, std::memory_order_relaxed);
+  g_allocation_bytes_attributed.fetch_add(
+    sampled_bytes, std::memory_order_relaxed);
+  g_active_allocation_writers.fetch_sub(
+    1, std::memory_order_acq_rel);
+}
+
+bool allocation_profiler_start(size_t bytes_per_sample,
+                               unsigned max_depth,
+                               size_t buffer_bytes) {
+  std::lock_guard<std::mutex> guard(g_lifecycle_lock);
+  if (g_allocation_running.load(std::memory_order_acquire)) {
+    fprintf(stderr,
+            "[allocation-profiler] start: already running\n");
+    return false;
+  }
+
+  if (bytes_per_sample < kAllocationPollBytes)
+    bytes_per_sample = kAllocationPollBytes;
+  if (max_depth < 1)
+    max_depth = 1;
+  if (max_depth > kMaxAllocationDepth)
+    max_depth = kMaxAllocationDepth;
+  if (buffer_bytes == 0)
+    buffer_bytes = kDefaultAllocationBufferBytes;
+
+  if (!g_allocation_buffer ||
+      g_allocation_buffer_bytes != buffer_bytes) {
+    if (g_allocation_buffer) {
+      munmap(g_allocation_buffer,
+             g_allocation_buffer_bytes);
+      g_allocation_buffer = nullptr;
+      g_allocation_buffer_bytes = 0;
+    }
+
+    void* mapped =
+      mmap(nullptr, buffer_bytes, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped == MAP_FAILED) {
+      fprintf(stderr,
+              "[allocation-profiler] mmap(%zu) failed: %s\n",
+              buffer_bytes, strerror(errno));
+      return false;
+    }
+    g_allocation_buffer = static_cast<uint8_t*>(mapped);
+    g_allocation_buffer_bytes = buffer_bytes;
+  }
+
+  g_allocation_write_offset.store(0, std::memory_order_release);
+  g_allocation_samples_recorded.store(0,
+                                      std::memory_order_release);
+  g_allocation_samples_dropped.store(0,
+                                     std::memory_order_release);
+  g_allocation_bytes_attributed.store(0,
+                                      std::memory_order_release);
+  g_allocation_bytes_dropped.store(0,
+                                  std::memory_order_release);
+  g_allocation_bytes_per_sample.store(
+    bytes_per_sample, std::memory_order_relaxed);
+  g_allocation_max_depth = max_depth;
+
+  // The first active profiler builds the immutable executable-range
+  // cache. A second profiler started concurrently reuses it.
+  if (!g_running.load(std::memory_order_acquire))
+    build_exec_range_cache();
+
+  uint64_t session_epoch =
+    g_allocation_session_epoch.fetch_add(
+      1, std::memory_order_acq_rel) + 1;
+
+  // Avoid mixing the initiating thread's pre-start remainder into this
+  // session. Other existing threads adopt the epoch lazily.
+  if (my_thread_low_level) {
+    gctools::AllocationProfiler& allocations =
+      my_thread_low_level->_Allocations;
+    allocations._AllocationSizeCounter = 0;
+    allocations._AllocationProfileEpoch = session_epoch;
+    allocations._AllocationProfileBytesPending = 0;
+  }
+
+  g_allocation_running.store(true, std::memory_order_release);
+  return true;
+}
+
+void allocation_profiler_stop() {
+  std::lock_guard<std::mutex> guard(g_lifecycle_lock);
+  if (!g_allocation_running.load(std::memory_order_acquire))
+    return;
+
+  g_allocation_running.store(false, std::memory_order_release);
+  while (g_active_allocation_writers.load(
+           std::memory_order_acquire) != 0)
+    std::this_thread::yield();
+}
+
+void allocation_profiler_reset() {
+  std::lock_guard<std::mutex> guard(g_lifecycle_lock);
+  if (g_allocation_running.load(std::memory_order_acquire)) {
+    fprintf(stderr,
+            "[allocation-profiler] reset: stop the profiler first\n");
+    return;
+  }
+
+  g_allocation_write_offset.store(0, std::memory_order_release);
+  g_allocation_samples_recorded.store(0,
+                                      std::memory_order_release);
+  g_allocation_samples_dropped.store(0,
+                                     std::memory_order_release);
+  g_allocation_bytes_attributed.store(0,
+                                      std::memory_order_release);
+  g_allocation_bytes_dropped.store(0,
+                                  std::memory_order_release);
+}
+
+size_t allocation_profiler_samples_recorded() {
+  return g_allocation_samples_recorded.load();
+}
+
+size_t allocation_profiler_samples_dropped() {
+  return g_allocation_samples_dropped.load();
+}
+
+size_t allocation_profiler_bytes_attributed() {
+  return g_allocation_bytes_attributed.load();
+}
+
+size_t allocation_profiler_bytes_dropped() {
+  return g_allocation_bytes_dropped.load();
+}
+
+size_t allocation_profiler_bytes_used() {
+  return g_allocation_write_offset.load();
+}
+
+size_t allocation_profiler_bytes_available() {
+  std::lock_guard<std::mutex> guard(g_lifecycle_lock);
+  return g_allocation_buffer_bytes;
+}
+
 bool sampling_profiler_running() {
   return g_running.load(std::memory_order_acquire);
 }
@@ -501,14 +803,18 @@ bool sampling_profiler_start(unsigned rate_hz, unsigned max_depth, size_t buffer
   g_samples_dropped.store(0, std::memory_order_release);
   g_max_depth = max_depth;
 
-  // Snapshot executable memory mappings for return-address validation.
-  // Must happen before arming the timer so the handler can use the cache.
-  build_exec_range_cache();
+  // The first active profiler builds the immutable executable-range
+  // cache. A second profiler started concurrently reuses it.
+  if (!g_allocation_running.load(std::memory_order_acquire))
+    build_exec_range_cache();
 
   if (!install_sigaction()) return false;
   // Populate this thread's stack bounds now, from a safe context, before
   // any sample can fire. pthread_getattr_np is not async-signal-safe.
   sampling_profiler_register_current_thread();
+  // Invalidate any delayed handler belonging to an earlier session before
+  // publishing the new session as running.
+  g_sampling_session_epoch.fetch_add(1);
   // Publish running=true BEFORE arming the timer so the first tick sees
   // it. Release ordering pairs with the handler's acquire load.
   g_running.store(true, std::memory_order_release);
@@ -531,10 +837,11 @@ void sampling_profiler_stop() {
   std::lock_guard<std::mutex> g(g_lifecycle_lock);
   if (!g_running.load(std::memory_order_acquire)) return;
   disarm_timer();
-  // Flip running=false BEFORE restoring the handler — any in-flight
-  // handler invocation will see the flag and fast-exit; the
-  // setitimer-disarm above prevents new signals.
-  g_running.store(false, std::memory_order_release);
+  // Prevent new writers, then wait until every writer that observed the
+  // active session has completed its record.
+  g_running.store(false);
+  while (g_active_sample_writers.load() != 0)
+    std::this_thread::yield();
   restore_sigaction();
 #if 0
   fprintf(stderr,
@@ -548,6 +855,11 @@ void sampling_profiler_stop() {
 
 void sampling_profiler_reset() {
   std::lock_guard<std::mutex> g(g_lifecycle_lock);
+  if (g_running.load(std::memory_order_acquire)) {
+    fprintf(stderr,
+            "[sampling-profiler] reset: stop the profiler first\n");
+    return;
+  }
   g_write_offset.store(0, std::memory_order_release);
   g_samples_recorded.store(0, std::memory_order_release);
   g_samples_dropped.store(0, std::memory_order_release);
@@ -657,6 +969,41 @@ static std::string symbolicate_one(uint64_t pc,
   return name;
 }
 
+static std::string allocation_type_frame(
+    uint32_t stamp_wtag,
+    uint32_t flags) {
+  size_t stamp_index =
+    gctools::Header_s::StampWtagMtag::make_nowhere_stamp(
+      static_cast<gctools::UnshiftedStamp>(stamp_wtag));
+
+  std::string name;
+  if (gctools::global_stamp_layout &&
+      stamp_index < gctools::global_stamp_max) {
+    const gctools::Stamp_layout& layout =
+      gctools::global_stamp_layout[stamp_index];
+    if (layout.layout_op != gctools::undefined_op &&
+        layout.name && layout.name[0])
+      name = layout.name;
+  }
+
+  if (name.empty()) {
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer),
+             "stamp-%zu/raw-0x%08x",
+             stamp_index, stamp_wtag);
+    name = buffer;
+  }
+
+  if (flags != 0) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer),
+             ":flags-0x%08x", flags);
+    name += buffer;
+  }
+
+  return sanitize_frame("allocation:" + name);
+}
+
 }  // anonymous namespace
 
 std::vector<SymbolicatedSample> sampling_profiler_symbolicated_samples() {
@@ -711,6 +1058,95 @@ std::vector<SymbolicatedSample> sampling_profiler_symbolicated_samples() {
   return out;
 }
 
+std::vector<SymbolicatedSample>
+allocation_profiler_symbolicated_samples() {
+  std::lock_guard<std::mutex> guard(g_lifecycle_lock);
+  std::vector<SymbolicatedSample> out;
+  if (g_allocation_running.load(std::memory_order_acquire)) {
+    fprintf(stderr,
+            "[allocation-profiler] symbolicated-samples: "
+            "stop the profiler first\n");
+    return out;
+  }
+  if (!g_allocation_buffer ||
+      g_allocation_write_offset.load() == 0)
+    return out;
+
+  std::unordered_map<uint64_t, std::string> sym_cache;
+  std::vector<PerfMapEntry> perf_map = load_perf_map();
+  std::unordered_map<std::string, size_t> group_index;
+
+  size_t end = g_allocation_write_offset.load();
+  size_t off = 0;
+  while (off < end) {
+    size_t remaining = end - off;
+    if (remaining < sizeof(AllocationSampleHeader))
+      break;
+
+    AllocationSampleHeader* header =
+      reinterpret_cast<AllocationSampleHeader*>(
+        g_allocation_buffer + off);
+
+    if (header->depth == 0 ||
+        header->depth > kMaxAllocationDepth ||
+        header->depth >
+          (remaining - sizeof(AllocationSampleHeader)) /
+            sizeof(uint64_t) ||
+        header->sampled_bytes == 0) {
+      fprintf(stderr,
+              "[allocation-profiler] malformed record at offset %zu\n",
+              off);
+      break;
+    }
+
+    size_t record_bytes =
+      sizeof(AllocationSampleHeader) +
+      header->depth * sizeof(uint64_t);
+    uint64_t* pcs = reinterpret_cast<uint64_t*>(
+      g_allocation_buffer + off + sizeof(AllocationSampleHeader));
+
+    std::vector<std::string> frames;
+    frames.reserve(header->depth + 1);
+    for (uint32_t index = header->depth; index-- > 0;)
+      frames.push_back(
+        symbolicate_one(pcs[index], sym_cache, perf_map));
+    frames.push_back(
+      allocation_type_frame(header->stamp_wtag,
+                            header->flags));
+
+    std::string key;
+    {
+      char thread_buffer[16];
+      int length =
+        snprintf(thread_buffer, sizeof(thread_buffer), "%u|",
+                 static_cast<unsigned>(header->thread_id));
+      key.append(thread_buffer, length);
+    }
+    for (const auto& frame : frames) {
+      key += ';';
+      key += frame;
+    }
+
+    size_t weight =
+      static_cast<size_t>(header->sampled_bytes);
+    auto found = group_index.find(key);
+    if (found == group_index.end()) {
+      SymbolicatedSample sample;
+      sample.thread_id = header->thread_id;
+      sample.sample_count = weight;
+      sample.frames = std::move(frames);
+      group_index.emplace(std::move(key), out.size());
+      out.push_back(std::move(sample));
+    } else {
+      out[found->second].sample_count += weight;
+    }
+
+    off += record_bytes;
+  }
+
+  return out;
+}
+
 bool sampling_profiler_save(const char* path) {
   auto groups = sampling_profiler_symbolicated_samples();
   if (groups.empty()) {
@@ -753,6 +1189,47 @@ bool sampling_profiler_save(const char* path) {
   return true;
 }
 
+bool allocation_profiler_save(const char* path) {
+  auto groups = allocation_profiler_symbolicated_samples();
+  if (groups.empty()) {
+    fprintf(stderr,
+            "[allocation-profiler] save: no samples available\n");
+    return false;
+  }
+
+  FILE* file = fopen(path, "w");
+  if (!file) {
+    fprintf(stderr,
+            "[allocation-profiler] save: fopen(%s) failed: %s\n",
+            path, strerror(errno));
+    return false;
+  }
+
+  std::unordered_map<std::string, size_t> counts;
+  size_t total_bytes = 0;
+  for (const auto& group : groups) {
+    std::string key;
+    for (const auto& frame : group.frames) {
+      if (!key.empty())
+        key += ';';
+      key += frame;
+    }
+    counts[key] += group.sample_count;
+    total_bytes += group.sample_count;
+  }
+
+  for (const auto& entry : counts)
+    fprintf(file, "%s %zu\n",
+            entry.first.c_str(), entry.second);
+
+  fclose(file);
+  fprintf(stderr,
+          "[allocation-profiler] wrote %zu attributed bytes "
+          "(%zu unique stacks) to %s\n",
+          total_bytes, counts.size(), path);
+  return true;
+}
+
 size_t sampling_profiler_samples_recorded() { return g_samples_recorded.load(); }
 size_t sampling_profiler_samples_dropped() { return g_samples_dropped.load(); }
 size_t sampling_profiler_bytes_used() { return g_write_offset.load(); }
@@ -762,6 +1239,8 @@ void sampling_profiler_register_current_thread() {
 }
 
 void sampling_profiler_add_executable_range(uintptr_t lo, uintptr_t hi) {
+  std::lock_guard<std::mutex> writer_guard(
+    g_dynamic_exec_range_writer_lock);
   size_t idx = g_dynamic_exec_range_count.load(std::memory_order_acquire);
   if (idx >= MAX_DYNAMIC_EXEC_RANGES) return;
   g_dynamic_exec_ranges[idx] = {lo, hi};
@@ -852,6 +1331,100 @@ CL_DOCSTRING(R"dx(Return the bytes available in the ring buffer.)dx");
 DOCGROUP(clasp);
 CL_DEFUN size_t ext__profile_bytes_available() {
   return g_buffer_bytes;
+}
+
+CL_DOCSTRING(R"dx(Start managed-allocation profiling.
+BYTES-PER-SAMPLE is the sampling interval; zero selects 1 MiB and smaller
+values are clamped to 1 MiB. MAX-DEPTH is clamped to [1,4096].
+BUFFER-BYTES zero selects a 64 MiB ring. Returns T on success.)dx");
+CL_LAMBDA(&key (bytes-per-sample 0) (max-depth 4096) (buffer-bytes 0));
+DOCGROUP(clasp);
+CL_DEFUN bool ext__allocation_profile_start(
+    size_t bytes_per_sample,
+    uint max_depth,
+    size_t buffer_bytes) {
+  return allocation_profiler_start(
+    bytes_per_sample, max_depth, buffer_bytes);
+}
+
+CL_DOCSTRING(R"dx(Stop allocation profiling, preserving recorded samples.)dx");
+DOCGROUP(clasp);
+CL_DEFUN void ext__allocation_profile_stop() {
+  allocation_profiler_stop();
+}
+
+CL_DOCSTRING(R"dx(Return true while allocation profiling is active.)dx");
+DOCGROUP(clasp);
+CL_DEFUN bool ext__allocation_profile_running_p() {
+  return allocation_profiler_running();
+}
+
+CL_DOCSTRING(R"dx(Discard recorded allocation samples and counters.
+The profiler must first be stopped.)dx");
+DOCGROUP(clasp);
+CL_DEFUN void ext__allocation_profile_reset() {
+  allocation_profiler_reset();
+}
+
+CL_DOCSTRING(R"dx(Return allocation stacks aggregated by attributed bytes.
+Each stack ends in an allocation:type frame.)dx");
+DOCGROUP(clasp);
+CL_DEFUN core::T_sp
+ext__allocation_profile_symbolicated_samples() {
+  std::vector<SymbolicatedSample> result =
+    allocation_profiler_symbolicated_samples();
+  core::ComplexVector_T_sp vector =
+    core::ComplexVector_T_O::make(
+      result.size(), nil<core::T_O>(), clasp_make_fixnum(0));
+  for (auto& sample : result)
+    vector->vectorPushExtend(sample.encode());
+  return vector;
+}
+
+CL_DOCSTRING(R"dx(Write allocation stacks and attributed-byte counts to PATH
+in collapsed-stacks format.)dx");
+DOCGROUP(clasp);
+CL_DEFUN bool
+ext__allocation_profile_save(core::String_sp path) {
+  return allocation_profiler_save(
+    path->get_std_string().c_str());
+}
+
+CL_DOCSTRING(R"dx(Return the number of allocation records captured.)dx");
+DOCGROUP(clasp);
+CL_DEFUN size_t ext__allocation_profile_samples_recorded() {
+  return allocation_profiler_samples_recorded();
+}
+
+CL_DOCSTRING(R"dx(Return allocation records dropped because the ring was full.)dx");
+DOCGROUP(clasp);
+CL_DEFUN size_t ext__allocation_profile_samples_dropped() {
+  return allocation_profiler_samples_dropped();
+}
+
+CL_DOCSTRING(R"dx(Return bytes represented by captured allocation records.)dx");
+DOCGROUP(clasp);
+CL_DEFUN size_t ext__allocation_profile_bytes_attributed() {
+  return allocation_profiler_bytes_attributed();
+}
+
+CL_DOCSTRING(R"dx(Return bytes represented by allocation records dropped
+because the ring was full.)dx");
+DOCGROUP(clasp);
+CL_DEFUN size_t ext__allocation_profile_bytes_dropped() {
+  return allocation_profiler_bytes_dropped();
+}
+
+CL_DOCSTRING(R"dx(Return bytes currently used in the allocation sample ring.)dx");
+DOCGROUP(clasp);
+CL_DEFUN size_t ext__allocation_profile_bytes_used() {
+  return allocation_profiler_bytes_used();
+}
+
+CL_DOCSTRING(R"dx(Return the allocation sample ring capacity in bytes.)dx");
+DOCGROUP(clasp);
+CL_DEFUN size_t ext__allocation_profile_bytes_available() {
+  return allocation_profiler_bytes_available();
 }
 
 CL_DOCSTRING(R"dx(Populate the current thread's stack bounds so that samples

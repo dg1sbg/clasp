@@ -34,10 +34,29 @@ struct SampleHeader {
   uint32_t depth;          // number of trailing PCs (0 if walk failed)
 };
 
+// Per-allocation sample header. An AllocationSampleHeader is followed
+// immediately by `depth` native PCs.
+//
+// This record represents one or more byte-sampling boundaries crossed by
+// the allocation. No pointers into the GC heap are retained.
+struct AllocationSampleHeader {
+  uint64_t timestamp_ns;
+  uint64_t vm_pc;             // bytecode VM pc, or 0 when unavailable
+  uint64_t sampled_bytes;     // bytes represented by this sample
+  uint64_t allocation_size;   // actual size of the triggering allocation
+  uint32_t thread_id;
+  uint32_t depth;
+  uint32_t stamp_wtag;        // preserve the allocator's raw unshifted value
+  uint32_t flags;             // allocation-policy flags; initially zero
+};
+
+static_assert(sizeof(AllocationSampleHeader) == 48,
+              "AllocationSampleHeader layout changed");
+
 // Aggregated symbolicated sample: one entry per unique (thread_id, frames)
 // group. `frames` is outermost-first (index 0 is the root, last is the
-// leaf). `sample_count` is the number of raw samples that collapsed into
-// this entry.
+// leaf). For CPU profiles, `sample_count` is the number of raw samples.
+// For allocation profiles, it is the number of attributed bytes.
 struct SymbolicatedSample {
   uint32_t thread_id;
   size_t   sample_count;
@@ -84,13 +103,52 @@ void sampling_profiler_register_current_thread();
 
 // Register an executable memory range with the profiler's return-address
 // validator. Call this when new executable pages are allocated (JIT, arena)
-// so the frame-pointer walker recognizes return addresses in them.
-// Lock-free, safe to call from any thread while the profiler is running.
+// so the frame-pointer walker recognizes return addresses in them. Calls
+// from multiple JIT threads are serialized; signal-handler reads remain
+// lock-free. This function must not itself be called from a signal handler.
 void sampling_profiler_add_executable_range(uintptr_t lo, uintptr_t hi);
 
 // Diagnostics.
 size_t sampling_profiler_samples_recorded();
 size_t sampling_profiler_samples_dropped();
 size_t sampling_profiler_bytes_used();
+
+// Allocation profiler -------------------------------------------------------
+//
+// This profiles managed allocation traffic. It does not measure retained
+// objects, collector fragmentation, native malloc, or resident memory.
+// A zero bytes-per-sample selects 1 MiB; smaller values are clamped to
+// 1 MiB. max-depth is clamped to [1, 4096]. A zero buffer size selects
+// a 64 MiB allocation-sample ring.
+bool allocation_profiler_start(size_t bytes_per_sample,
+                               unsigned max_depth,
+                               size_t buffer_bytes);
+void allocation_profiler_stop();
+bool allocation_profiler_running();
+void allocation_profiler_reset();
+
+// Return a coherent snapshot of the active allocation-profile session.
+// Used only by the sparse allocation slow path.
+bool allocation_profiler_session(uint64_t& session_epoch,
+                                 size_t& bytes_per_sample);
+
+// Called only when the allocation fast path crosses a sampling boundary.
+// It must remain allocation-free, lock-free, and safe against reentry.
+void allocation_profiler_record(uint32_t stamp_wtag,
+                                size_t allocation_size,
+                                size_t sampled_bytes,
+                                uint32_t flags,
+                                uint64_t session_epoch);
+
+std::vector<SymbolicatedSample>
+allocation_profiler_symbolicated_samples();
+bool allocation_profiler_save(const char* path);
+
+size_t allocation_profiler_samples_recorded();
+size_t allocation_profiler_samples_dropped();
+size_t allocation_profiler_bytes_attributed();
+size_t allocation_profiler_bytes_dropped();
+size_t allocation_profiler_bytes_used();
+size_t allocation_profiler_bytes_available();
 
 } // namespace core
