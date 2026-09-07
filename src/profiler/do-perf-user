@@ -1,0 +1,18 @@
+#!/bin/bash
+
+PID=$1
+TIME=${2:-10}
+RATE=${3:-97}
+FRAMES=${4:-6000}
+DIR="/tmp"
+kill -SIGUSR1 $PID
+echo perf record -p $PID -F $RATE --call-graph fp,60000 -o $DIR/out-$PID.data -- sleep $TIME
+echo The system stack depth is in /proc/sys/kernel/perf_event_max_stack = `cat /proc/sys/kernel/perf_event_max_stack`
+perf record -p $PID -F $RATE --call-graph fp,60000 -o $DIR/out-$PID.data -- sleep $TIME
+chmod go+rw $DIR/out-$PID.data
+perf script -i $DIR/out-$PID.data --max-stack=60000 > $DIR/out-$PID.perf
+echo FLAME_GRAPH_HOME=$FLAME_GRAPH_HOME
+$FLAME_GRAPH_HOME/stackcollapse-perf.pl $DIR/out-$PID.perf > $DIR/out-$PID.folded
+$FLAME_GRAPH_HOME/flamegraph.pl --color=clasp $DIR/out-$PID.folded > $DIR/out-$PID.svg
+cp $DIR/out-$PID.svg $FLAME_DIR/latest-flame-graph.svg
+echo $DIR/out-$PID.svg
