@@ -786,7 +786,8 @@ function-or-placeholder - the llvm function or a placeholder for
 
 (defmethod translate-simple-instruction ((instruction bir:enclose) abi)
   (declare (ignore abi))
-  (out (enclose (bir:code instruction) (bir:extent instruction))
+  (out (enclose (bir:code instruction) (bir:extent instruction) t
+                :stack (typep (bir:use (bir:output instruction)) 'bir:unwind-protect))
        (bir:output instruction)))
 
 #+(or)
@@ -918,7 +919,7 @@ function-or-placeholder - the llvm function or a placeholder for
       (error "BUG: Tried to ENCLOSE a function with no XEP"))
     (info-literal info)))
 
-(defun enclose (function extent &optional (delay t))
+(defun enclose (function extent &optional (delay t) &key stack)
   (let* ((code-info (find-llvm-function-info function))
          (environment (environment code-info))
          (xepc (reference-xep code-info)))
@@ -926,19 +927,19 @@ function-or-placeholder - the llvm function or a placeholder for
         (let* ((ninputs (length environment))
                (sninputs (%size_t ninputs))
                (enclose
-                 (ecase extent
-                   #+(or)
-                   (:dynamic
-                    (%intrinsic-call
-                     "cc_stack_enclose"
-                     (list (cmp:alloca-i8 (core:closure-size ninputs)
+                 ;; only a STACK :dynamic enclose (an unwind-protect cleanup) lives in the frame; 25f5cb7fe keeps the rest on the heap
+                 (if (and (eq extent :dynamic) stack)
+                     (%intrinsic-call
+                      "cc_stack_enclose"
+                      (list (cmp:alloca-i8 (core:closure-size ninputs)
                                            :alignment cmp:+alignment+
                                            :label "stack-allocated-closure")
-                           xepc sninputs)))
-                   ((:dynamic :indefinite)
-                    (%intrinsic-invoke-if-landing-pad-or-call
-                     "cc_enclose"
-                     (list xepc sninputs))))))
+                            xepc sninputs))
+                     (progn
+                       (check-type extent (member :dynamic :indefinite))
+                       (%intrinsic-invoke-if-landing-pad-or-call
+                        "cc_enclose"
+                        (list xepc sninputs))))))
           ;; We may not initialize the closure immediately in case it partakes
           ;; in mutual reference.
           ;; (If DELAY NIL is passed this delay is not necessary.)
