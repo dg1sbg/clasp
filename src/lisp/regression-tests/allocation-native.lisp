@@ -157,27 +157,84 @@ result's entry is a SIMPLE-CORE-FUN, so this file never measures a bytecode func
 (test alloc-native.handler-case.novar
       (native-bytes-per-call '(lambda (i) (handler-case (%alloc-touch i) (%alloc-full () (%alloc-touch 0)))))
       (0)
-      :description "reads 144 today: the cluster 72, an escaping closure that GOes 40, a heap TagbodyDynEnv 32 (slice 5 to 72, slice 6 to 0)")
+      :description "reads 72 since slice 5, the cluster alone (it read 144: an escaping closure that GOed 40 and a heap TagbodyDynEnv 32 on top); slice 6 takes the cluster to 0")
 
 (test alloc-native.handler-case.var
       (native-bytes-per-call '(lambda (i) (handler-case (%alloc-touch i) (%alloc-full (c) (%alloc-touch c)))))
       (0)
-      :description "reads 176 today: 144 plus a cell and a slot for the SETQ'd clause variable (slice 5 to 72, slice 6 to 0)")
+      :description "reads 72 since slice 5 (it read 176: 144 plus a cell and a slot for the SETQ'd clause variable); slice 6 takes the cluster to 0")
 
 (test alloc-native.ignore-errors
       (native-bytes-per-call '(lambda (i) (ignore-errors (%alloc-touch i))))
       (0)
-      :description "reads 176 today: IGNORE-ERRORS is HANDLER-CASE with a clause variable (slice 5 to 72, slice 6 to 0)")
+      :description "reads 72 since slice 5: IGNORE-ERRORS is HANDLER-CASE with a clause variable (it read 176); slice 6 takes the cluster to 0")
 
 (test alloc-native.cnm-1arg
       (native-bytes-per-call '(lambda (i) (%alloc-touch (%alloc-gf1 *alloc-sub*))))
       (0)
-      :description "reads 24 today: a method that mentions CALL-NEXT-METHOD pays the contf &REST gather, 24 per required argument, on every call (slice 5)")
+      :description "read 24 until slice 5: a method that mentions CALL-NEXT-METHOD paid the contf &REST gather, 24 per required argument, on every call; the effective method takes a fixed arity now")
 
 (test alloc-native.cnm-2args
       (native-bytes-per-call '(lambda (i) (%alloc-touch (%alloc-gf2 *alloc-sub* i))))
       (0)
-      :description "reads 48 today: 24 per required argument (slice 5)")
+      :description "read 48 until slice 5: 24 per required argument; 0 with a fixed-arity effective method")
+
+;;; ---- the fixnum-tag HANDLER-CASE's correctness: it must still be HANDLER-CASE ---------------
+
+(define-condition %alloc-other (error) ())
+(define-condition %alloc-sub-full (%alloc-full) ())
+(defun %alloc-never-p (c) (declare (ignore c)) nil)
+
+(test alloc-native.handler-case.fires-in-clause-order
+      (funcall (native-compile
+                '(lambda (i)
+                  (handler-case (progn (%alloc-touch i) (error '%alloc-sub-full))
+                    (%alloc-other () :other)
+                    (%alloc-full (c) (list :full (type-of c)))
+                    (%alloc-sub-full () :sub))))
+               0)
+      ((:full %alloc-sub-full))
+      :description "the first clause whose type matches wins, as %SIGNAL matched it, and the clause variable is bound to the condition")
+
+(test alloc-native.handler-case.values-through
+      (multiple-value-list
+       (funcall (native-compile '(lambda (i) (handler-case (values i (1+ i) (+ i 2)) (%alloc-full () :no)))) 5))
+      ((5 6 7))
+      :description "a body that does not signal returns every value through the catch")
+
+(test alloc-native.handler-case.nested-and-satisfies
+      (funcall (native-compile
+                '(lambda (i)
+                  (handler-case
+                      (handler-case (error '%alloc-full)
+                        ((satisfies %alloc-never-p) () :never)
+                        (%alloc-other () :inner-other))
+                    (%alloc-full () (list :outer i)))))
+               3)
+      ((:outer 3))
+      :description "an inner HANDLER-CASE whose clauses do not match is unwound past; a SATISFIES type is tested by %SIGNAL and by the clause selection alike")
+
+(defvar *alloc-flag* nil)
+(defun %alloc-flag-p (c) (declare (ignore c)) *alloc-flag*)
+
+(test alloc-native.handler-case.clause-chosen-once
+      (funcall (native-compile
+                '(lambda (i)
+                  (handler-case (let ((*alloc-flag* t)) (error '%alloc-full))
+                    ((satisfies %alloc-flag-p) () (list :matched i))
+                    (error () :second))))
+               7)
+      ((:matched 7))
+      :description "the clause %SIGNAL matched is the clause that runs, even when its type test depends on a binding the unwind undoes: a second test after the unwind would miss it and run the next clause, or swallow the condition")
+
+(test alloc-native.handler-case.two-threads
+      (let* ((f (native-compile '(lambda (i) (handler-case (error '%alloc-full) (%alloc-full () i)))))
+             (work (lambda () (let ((sum 0)) (dotimes (k 10000 sum) (incf sum (funcall f 1))))))
+             (a (mp:process-run-function "alloc-handler-case-a" work))
+             (b (mp:process-run-function "alloc-handler-case-b" work)))
+        (list (mp:process-join a) (mp:process-join b)))
+      ((10000 10000))
+      :description "two threads run ten thousand nested catch tags each at once; every throw finds its own HANDLER-CASE")
 
 ;;; ---- the stack cleanup's correctness: a THROW through it, and the collector under it -------
 

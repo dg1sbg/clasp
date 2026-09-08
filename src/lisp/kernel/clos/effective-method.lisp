@@ -74,8 +74,26 @@
                   (emf-call-method
                    (first next-methods) (list (rest next-methods))
                    arg-info))))
-    (lambda (&rest .method-args.)
-      (apply contf next .method-args.))))
+    ;; fixed arity where the generic has only required parameters: no &rest list per call.
+    ;; ARG-INFO is (REQ... REST-or-NIL) from GF-ARG-INFO or (NO-REST-FLAG REQ...) from
+    ;; ARGFORMS-TO-ARG-INFO; a bare (NIL) is read as "with rest", the safe reading of both.
+    (multiple-value-bind (nreq fixedp)
+        (cond ((eq (first arg-info) t) (values (length (rest arg-info)) t))
+              ((null (first arg-info)) (values 0 nil))
+              (t (values (length (butlast arg-info)) (null (first (last arg-info))))))
+      (if (not fixedp)
+          (lambda (&rest .method-args.)
+            (declare (core:lambda-name effective-method))
+            (apply contf next .method-args.))
+          (case nreq
+            (0 (lambda () (declare (core:lambda-name effective-method)) (funcall contf next)))
+            (1 (lambda (a) (declare (core:lambda-name effective-method)) (funcall contf next a)))
+            (2 (lambda (a b) (declare (core:lambda-name effective-method)) (funcall contf next a b)))
+            (3 (lambda (a b c) (declare (core:lambda-name effective-method)) (funcall contf next a b c)))
+            (4 (lambda (a b c d) (declare (core:lambda-name effective-method)) (funcall contf next a b c d)))
+            (t (lambda (&rest .method-args.)
+                 (declare (core:lambda-name effective-method))
+                 (apply contf next .method-args.))))))))
 
 (defun emf-call-method (method rest arg-info)
   (cond ((make-method-form-p method)
