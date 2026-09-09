@@ -1065,43 +1065,55 @@ function-or-placeholder - the llvm function or a placeholder for
         (loop for i below nreq
               do (cmp:irc-add-case sw (%size_t i) mismatch))
         ;; Generate optional arg cases, including the exactly-enough case.
+        ;; ★THE PHI'S PREDECESSOR IS THE BLOCK THE VALUES END IN, NOT THE ONE THEY START IN.
+        ;; Building an argument can emit an INVOKE -- an unboxing cast here, CC_MVCGATHERREST2 in the
+        ;; more-than-enough case below -- and an invoke ENDS its block, continuing in a fresh
+        ;; normal-destination block (irc-create-invoke-wft).  Naming the block we began then gives
+        ;; MERGE a phi entry for a block that does not branch to it: "PHI node entries do not match
+        ;; predecessors", and a broken module.  It happens only with a landing pad in scope, i.e. an
+        ;; enclosing unwind-protect or handler-case, which is why COMPILE-FILE'd code -- where such a
+        ;; function is rarer -- did not show it.  So read the insert block AFTER the values are built.
         (loop for i upto nopt
               for b = (cmp:irc-basic-block-create
                        (format nil "lmvc-optional-~d" i))
               do (cmp:irc-add-case sw (%size_t (+ nreq i)) b)
                  (cmp:irc-begin-block b)
-                 (loop for phi in opt-phis
-                       for val in (optionals i)
-                       do (cmp:irc-phi-add-incoming phi val b))
-                 (when (and rest-var (not (bir:unused-p rest-var)))
-                   (cmp:irc-phi-add-incoming
-                    rest-phi
-                    (if varest-p
-                        (maybe-boxed-vaslist
-                         rest-vaboxp (%size_t 0)
-                         (llvm-sys:constant-pointer-null-get cmp:%t**%))
-                        (%nil))
-                    b))
+                 (let* ((vals (optionals i))
+                        (rest-val
+                          (when (and rest-var (not (bir:unused-p rest-var)))
+                            (if varest-p
+                                (maybe-boxed-vaslist
+                                 rest-vaboxp (%size_t 0)
+                                 (llvm-sys:constant-pointer-null-get cmp:%t**%))
+                                (%nil))))
+                        (pred (cmp:irc-get-insert-block)))
+                   (loop for phi in opt-phis
+                         for val in vals
+                         do (cmp:irc-phi-add-incoming phi val pred))
+                   (when rest-val
+                     (cmp:irc-phi-add-incoming rest-phi rest-val pred)))
                  (cmp:irc-br merge))
         ;; If there's a &rest, generate the more-than-enough arguments case.
         (when rest-var
           (cmp:irc-begin-block mte)
-          (loop for phi in opt-phis
-                for val in (optionals nopt)
-                do (cmp:irc-phi-add-incoming phi val mte))
-          (unless (bir:unused-p rest-var)
-            (cmp:irc-phi-add-incoming
-             rest-phi
-             (if varest-p
-                 (maybe-boxed-vaslist
-                  rest-vaboxp
-                  (cmp:irc-sub rnret (%size_t nfixed))
-                  (cmp:irc-typed-gep cmp:%t*% rvalues (list nfixed)))
-                 (%intrinsic-invoke-if-landing-pad-or-call
-                  "cc_mvcGatherRest2"
-                  (list (cmp:irc-typed-gep cmp:%t*% rvalues (list nfixed))
-                        (cmp:irc-sub rnret (%size_t nfixed)))))
-             mte))
+          (let* ((vals (optionals nopt))
+                 (rest-val
+                   (unless (bir:unused-p rest-var)
+                     (if varest-p
+                         (maybe-boxed-vaslist
+                          rest-vaboxp
+                          (cmp:irc-sub rnret (%size_t nfixed))
+                          (cmp:irc-typed-gep cmp:%t*% rvalues (list nfixed)))
+                         (%intrinsic-invoke-if-landing-pad-or-call
+                          "cc_mvcGatherRest2"
+                          (list (cmp:irc-typed-gep cmp:%t*% rvalues (list nfixed))
+                                (cmp:irc-sub rnret (%size_t nfixed)))))))
+                 (pred (cmp:irc-get-insert-block)))
+            (loop for phi in opt-phis
+                  for val in vals
+                  do (cmp:irc-phi-add-incoming phi val pred))
+            (when rest-val
+              (cmp:irc-phi-add-incoming rest-phi rest-val pred)))
           (cmp:irc-br merge))
         ;; Generate the call, in the merge block.
         (cmp:irc-begin-block merge)
